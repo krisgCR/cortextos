@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 import { getCTXRoot, getAllAgents } from '@/lib/config';
+import { emitHumanPromptNonBlocking } from '@/lib/telemetry-emit';
 
 export const dynamic = 'force-dynamic';
 
@@ -113,6 +114,9 @@ export async function POST(request: NextRequest) {
       source: 'dashboard',
     });
     fs.appendFileSync(logFile, logEntry + '\n');
+
+    // Tap 1: human_prompt telemetry — fire-and-forget, never breaks send path.
+    emitHumanPromptNonBlocking(agent);
 
     return Response.json({ success: true, messageId }, { status: 200 });
   } catch (err: unknown) {

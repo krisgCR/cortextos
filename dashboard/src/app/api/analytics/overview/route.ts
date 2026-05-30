@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server';
-import { getTaskThroughput, getAgentEffectiveness } from '@/lib/data/analytics';
+import { getTaskThroughput, getAgentEffectiveness, getBaselineTelemetry } from '@/lib/data/analytics';
 import { getDailyCosts, getDailyCostByModel, getCurrentMonthCost, getCostByModel } from '@/lib/cost-parser';
 import { getFleetHealth } from '@/lib/data/reports';
 import { getAllAgents } from '@/lib/config';
@@ -38,6 +38,9 @@ export async function GET(request: NextRequest) {
     // Agent effectiveness
     const effectiveness = getAgentEffectiveness(org);
 
+    // Baseline telemetry (P0b-2): human-prompts-per-task ratio + free signals
+    const baseline = getBaselineTelemetry(days, org);
+
     // Cost data
     const dailyCosts = getDailyCosts(days);
     const dailyCostByModel = getDailyCostByModel(days);
@@ -54,6 +57,7 @@ export async function GET(request: NextRequest) {
         currentMonth: currentMonthCost,
         modelBreakdown: costByModel,
       },
+      baseline,
     });
   } catch (err) {
     console.error('[api/analytics/overview] error:', err);
