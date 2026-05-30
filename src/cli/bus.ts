@@ -2451,6 +2451,11 @@ busCommand
   .action(() => runHook('hook-idle-flag'));
 
 busCommand
+  .command('hook-deny-list')
+  .description('PreToolUse hook: fail-closed deny-list guard (rm -rf, secret reads, pipe-to-shell, out-of-agent-dir writes)')
+  .action(() => runHook('hook-deny-list'));
+
+busCommand
   .command('hook-loop-detector')
   .description('PreToolUse hook: detects and blocks repeated tool loops (same-args repetition + ping-pong alternation)')
   .action(() => runHook('hook-loop-detector'));
