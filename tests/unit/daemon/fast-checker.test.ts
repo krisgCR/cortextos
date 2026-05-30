@@ -789,10 +789,18 @@ describe('FastChecker', () => {
     beforeEach(() => { vi.useFakeTimers(); });
     afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); });
 
+    // Use a pollInterval larger than the advanced window so that advancing the
+    // fake clock to fire the 50-min watchdog does NOT spin the poll loop
+    // thousands of times (default pollInterval is 1s → ~3000 iterations over
+    // 50 min, each doing real async fs work). Under parallel suite load that
+    // overran the 10s test timeout; the watchdog cadence is what these tests
+    // assert, so the poll cadence is irrelevant here.
+    const WATCHDOG_TEST_OPTS = { pollInterval: 60 * 60 * 1000 };
+
     it('fires exec after bootstrap at 50-min interval', async () => {
       const { execFile } = await import('child_process');
       const agent = createMockAgent('my-agent');
-      const checker = new FastChecker(agent, paths, '/tmp/framework');
+      const checker = new FastChecker(agent, paths, '/tmp/framework', WATCHDOG_TEST_OPTS);
       checker.start();
       await vi.advanceTimersByTimeAsync(50 * 60 * 1000);
       expect(execFile).toHaveBeenCalledWith(
@@ -808,7 +816,7 @@ describe('FastChecker', () => {
       const { execFile } = await import('child_process');
       const execMock = execFile as ReturnType<typeof vi.fn>;
       const agent = createMockAgent('my-agent');
-      const checker = new FastChecker(agent, paths, '/tmp/framework');
+      const checker = new FastChecker(agent, paths, '/tmp/framework', WATCHDOG_TEST_OPTS);
       checker.start();
       await vi.advanceTimersByTimeAsync(50 * 60 * 1000);
       const callsBefore = execMock.mock.calls.length;
@@ -823,7 +831,7 @@ describe('FastChecker', () => {
       const { execFile } = await import('child_process');
       const agent = createMockAgent('my-agent');
       agent.isBootstrapped.mockReturnValue(false);
-      const checker = new FastChecker(agent, paths, '/tmp/framework');
+      const checker = new FastChecker(agent, paths, '/tmp/framework', WATCHDOG_TEST_OPTS);
       checker.start();
       await vi.advanceTimersByTimeAsync(20 * 1000);
       expect(execFile).not.toHaveBeenCalledWith(
