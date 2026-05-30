@@ -28,10 +28,11 @@ function parseEnvFile(filePath: string): Record<string, string> {
 export const dashboardCommand = new Command('dashboard')
   .option('--port <port>', 'Port to run dashboard on', '3000')
   .option('--instance <id>', 'Instance ID', 'default')
+  .option('--hostname <host>', 'Host interface to bind. Defaults to localhost-only; set 0.0.0.0 for remote/tunnel access.', '127.0.0.1')
   .option('--build', 'Build for production first (recommended for Cloudflare Tunnel / remote access)')
   .option('--install', 'Install dashboard dependencies first')
   .description('Start the cortextOS dashboard (Next.js)')
-  .action(async (options: { port: string; instance: string; build?: boolean; install?: boolean }) => {
+  .action(async (options: { port: string; instance: string; hostname: string; build?: boolean; install?: boolean }) => {
     const { execSync, spawn } = require('child_process');
 
     // Find dashboard directory
@@ -140,8 +141,8 @@ export const dashboardCommand = new Command('dashboard')
 
     const startMode = options.build ? 'start' : 'dev';
     const startArgs = startMode === 'start'
-      ? ['next', 'start', '--port', options.port]
-      : ['next', 'dev', '--port', options.port];
+      ? ['next', 'start', '--port', options.port, '--hostname', options.hostname]
+      : ['next', 'dev', '--port', options.port, '--hostname', options.hostname];
 
     console.log(`\nDashboard starting on http://localhost:${options.port}`);
     console.log(`  Admin username: ${adminUsername}`);
