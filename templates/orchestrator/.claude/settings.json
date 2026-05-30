@@ -37,6 +37,15 @@
         "hooks": [
           {
             "type": "command",
+            "command": "cortextos bus hook-deny-list",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
             "command": "cortextos bus hook-loop-detector",
             "timeout": 5
           }
