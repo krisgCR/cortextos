@@ -31,8 +31,10 @@ export const dashboardCommand = new Command('dashboard')
   .option('--hostname <host>', 'Host interface to bind. Defaults to localhost-only; set 0.0.0.0 for remote/tunnel access.', '127.0.0.1')
   .option('--build', 'Build for production first (recommended for Cloudflare Tunnel / remote access)')
   .option('--install', 'Install dashboard dependencies first')
+  .option('--remote-origin <url>', 'Tailscale/tunnel origin URL (e.g. https://host.ts.net). Provisions NEXTAUTH_URL, DASHBOARD_URL, TRUST_PROXY for remote access.')
+  .option('--trust-proxy <bool>', 'Trust X-Forwarded-For from proxy (default: false — flip to true only after live IP-provenance probe confirms the proxy sanitizes headers)', 'false')
   .description('Start the cortextOS dashboard (Next.js)')
-  .action(async (options: { port: string; instance: string; hostname: string; build?: boolean; install?: boolean }) => {
+  .action(async (options: { port: string; instance: string; hostname: string; build?: boolean; install?: boolean; remoteOrigin?: string; trustProxy?: string }) => {
     const { execSync, spawn } = require('child_process');
 
     // Find dashboard directory
@@ -122,6 +124,13 @@ export const dashboardCommand = new Command('dashboard')
       `CTX_INSTANCE_ID=${options.instance}`,
       `PORT=${options.port}`,
     ];
+    if (options.remoteOrigin) {
+      nextEnvLines.push(
+        `NEXTAUTH_URL=${options.remoteOrigin}`,
+        `DASHBOARD_URL=${options.remoteOrigin}`,
+        `TRUST_PROXY=${options.trustProxy ?? 'false'}`,
+      );
+    }
     writeFileSync(nextEnvPath, nextEnvLines.join('\n') + '\n', 'utf-8');
     try { chmodSync(nextEnvPath, 0o600); } catch { /* ignore on Windows */ }
 
@@ -137,6 +146,11 @@ export const dashboardCommand = new Command('dashboard')
       CTX_FRAMEWORK_ROOT: process.cwd(),
       CTX_INSTANCE_ID: options.instance,
       AUTH_TRUST_HOST: process.env.AUTH_TRUST_HOST || 'true',
+      ...(options.remoteOrigin ? {
+        NEXTAUTH_URL: options.remoteOrigin,
+        DASHBOARD_URL: options.remoteOrigin,
+        TRUST_PROXY: options.trustProxy ?? 'false',
+      } : {}),
     };
 
     const startMode = options.build ? 'start' : 'dev';
@@ -152,6 +166,9 @@ export const dashboardCommand = new Command('dashboard')
       console.log('  Mode: production');
     } else {
       console.log('  Mode: dev (use --build for production/tunnel use)');
+    }
+    if (options.remoteOrigin) {
+      console.log(`  Remote origin: ${options.remoteOrigin} (TRUST_PROXY=${options.trustProxy ?? 'false'})`);
     }
     console.log('');
 
