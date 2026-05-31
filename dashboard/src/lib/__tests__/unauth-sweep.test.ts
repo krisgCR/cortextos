@@ -30,6 +30,7 @@ vi.mock('jose', () => ({
 }));
 
 import { NextRequest } from 'next/server';
+import { enumerateApiRoutes, getApiDir, pathVariants } from './redteam-base-url';
 
 let middlewareFn: (typeof import('../../middleware'))['middleware'];
 
@@ -128,3 +129,35 @@ describe('allowlist routes are NOT in the 401 sweep (sanity check)', () => {
     expect(res.status).not.toBe(401);
   });
 });
+
+// ---------------------------------------------------------------------------
+// §8.5 network sweep — real routes via HTTP (only runs when REDTEAM_BASE_URL is set)
+//
+// [CR4] Enumerates every concrete route.ts under app/api/** (not one-per-group),
+// tests canonical + trailing-slash + URL-encoded path variants.
+// Allowlist (auth/*, workflows/health) is excluded from the sweep.
+// ---------------------------------------------------------------------------
+
+const networkBase = process.env.REDTEAM_BASE_URL;
+
+if (networkBase) {
+  const apiRoutes = enumerateApiRoutes(getApiDir());
+
+  describe(`§8.5 network sweep: ${apiRoutes.length} real routes at ${networkBase}`, () => {
+    for (const route of apiRoutes) {
+      for (const variant of pathVariants(route)) {
+        it(`GET ${variant} → 401 (unauthenticated, over network)`, async () => {
+          const res = await fetch(`${networkBase}${variant}`, {
+            method: 'GET',
+            redirect: 'manual',
+          });
+          // 401 for API routes; 3xx redirect (→ /login) also acceptable for page routes
+          expect([401, 301, 302, 307, 308]).toContain(res.status);
+          // Must never be 200 (open route) or 500 (broken guard)
+          expect(res.status).not.toBe(200);
+          expect(res.status).not.toBe(500);
+        }, 10_000);
+      }
+    }
+  });
+}

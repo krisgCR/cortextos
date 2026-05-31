@@ -37,6 +37,7 @@ import { NextRequest } from 'next/server';
 import { getToken } from 'next-auth/jwt';
 import { jwtVerify } from 'jose';
 import { auth } from '@/lib/auth';
+import { getBaseUrl } from './redteam-base-url';
 
 const mockGetToken = vi.mocked(getToken);
 const mockJwtVerify = vi.mocked(jwtVerify);
@@ -192,3 +193,37 @@ describe('SSE auth: /api/messages/stream/[agent]', () => {
     expect(res.headers.get('Content-Type')).toContain('text/event-stream');
   });
 });
+
+// ---------------------------------------------------------------------------
+// [CR1] Positive-auth smoke — real session reaches a protected route
+//
+// Runs only when REDTEAM_BASE_URL is set (requires a live origin).
+// REDTEAM_SESSION_TOKEN: copy authjs.session-token from a logged-in browser session.
+// Proves the cookieName fix works end-to-end: middleware accepts real sessions
+// (not only that it rejects forged ones).
+// ---------------------------------------------------------------------------
+
+if (process.env.REDTEAM_BASE_URL) {
+  const base = getBaseUrl();
+
+  describe('[CR1] positive-auth smoke: real login-issued session reaches protected route', () => {
+    it('GET /api/agents with real authjs.session-token cookie → not 401', async () => {
+      const sessionToken = process.env.REDTEAM_SESSION_TOKEN;
+      if (!sessionToken) {
+        console.warn(
+          '[CR1 smoke] REDTEAM_SESSION_TOKEN not set — ' +
+          'log in at the live origin, copy authjs.session-token from DevTools, then re-run.',
+        );
+        return;
+      }
+      const res = await fetch(`${base}/api/agents`, {
+        headers: { cookie: `authjs.session-token=${sessionToken}` },
+        redirect: 'manual',
+      });
+      // A real session must NOT be rejected (401) — that is the cookieName bug [CR1].
+      // Accept 200 (data) or 3xx (redirect within the app); reject 401 and 500.
+      expect(res.status).not.toBe(401);
+      expect(res.status).not.toBe(500);
+    }, 15_000);
+  });
+}
