@@ -17,6 +17,11 @@ const allowedDevOrigins = (process.env.DASHBOARD_ALLOWED_DEV_ORIGINS ?? '')
   .filter(Boolean);
 
 const nextConfig: NextConfig = {
+  // Pin the Turbopack workspace root to this dashboard dir. Without this, Next.js
+  // infers the root from the nearest ancestor lockfile and walks up into
+  // ../knowledge-base/venv, whose Python symlink escapes the repo root and
+  // crashes Turbopack ("Symlink ... points out of the filesystem root").
+  turbopack: { root: __dirname },
   serverExternalPackages: ['better-sqlite3'],
   ...(allowedDevOrigins.length > 0 && { allowedDevOrigins }),
   async headers() {
