@@ -100,9 +100,11 @@ export async function middleware(request: NextRequest) {
       const token = await getToken({
         req: request,
         secret: authSecretForSession,
-        // NextAuth v5 auto-detects the cookie name based on secureCookie;
-        // we rely on that default so this works in both dev (`authjs.session-token`)
-        // and prod (`__Secure-authjs.session-token`).
+        // auth.ts forces `name: 'authjs.session-token'` on all sessions (no __Secure-
+        // prefix even in production) so getToken() must look for the same name.
+        // Without this, getToken() under HTTPS auto-detects '__Secure-authjs.session-token'
+        // while auth.ts set the un-prefixed name → legitimate sessions are rejected [CR1].
+        cookieName: 'authjs.session-token',
       });
       hasSession = !!token;
     } catch {
