@@ -17,7 +17,7 @@
  */
 
 import { realpathSync } from 'fs';
-import { dirname, basename, join } from 'path';
+import { dirname, basename, join, isAbsolute } from 'path';
 import { homedir } from 'os';
 import { readStdin } from './index.js';
 import { isPathUnderRoots, SYSTEM_BLOCKLIST } from '../utils/allowed-roots.js';
@@ -102,9 +102,12 @@ function isSystemBlocked(normalizedPath: string): boolean {
 const RM_RECURSIVE_RE = /\brm\b[^|&;\n]*(?:-[a-zA-Z]*[rR]|-[rR]\b|--recursive\b)/;
 const RM_FORCE_RE = /\brm\b[^|&;\n]*(?:-[a-zA-Z]*[fF]|-[fF]\b|--force\b)/;
 
-// Targets that make rm -rf destructive at scale.
+// Targets that make rm -rf destructive at scale. Covers POSIX roots, macOS
+// roots (/Users, /Library, /Applications, /System, /Volumes, /private), and
+// quoted/brace variants of bare root and $HOME ("/" , '/', "$HOME", ${HOME}).
+// Quoted `~` is intentionally NOT treated as home — bash does not expand it.
 const DANGEROUS_RM_TARGET_RE =
-  /\brm\b[^|&;\n]*(?:~(?:\/|$)|\$HOME(?:\/|$)|\/(?:\s|$|\*)|\/home\b|\/root\b|\/usr\b|\/etc\b|\/var\b|\/boot\b|\/dev\b|\/sys\b|\/proc\b)/;
+  /\brm\b[^|&;\n]*(?:~(?:\/|$)|\$HOME(?:\/|$|")|\$\{HOME\}|["']\/(?:["']|\s|$|\*)|\/(?:\s|$|\*)|\/home\b|\/root\b|\/usr\b|\/etc\b|\/var\b|\/boot\b|\/dev\b|\/sys\b|\/proc\b|\/Users\b|\/Library\b|\/Applications\b|\/System\b|\/Volumes\b|\/private\b)/;
 
 // Secret reads via common shell reading commands.
 // Includes tilde, $HOME, and absolute home path so injected absolute paths don't bypass.
@@ -171,6 +174,80 @@ function checkWriteFence(toolName: string, filePath: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// Codex apply_patch path extraction
+//
+// Codex's apply_patch tool does NOT carry a Claude-style `file_path`. The
+// app-server data model (ApplyPatchApprovalParams, schema-confirmed) is a
+// `fileChanges` map keyed by target path with add/delete/update changes; an
+// `update` may carry a `move_path` rename target. The exact PreToolUse hook
+// stdin shape is a runtime contract not pinned by the protocol JSON schema
+// (live-confirmed only by the deferred §8.10 test), so we extract target paths
+// from every plausible shape and fence each one:
+//   - fileChanges / changes object-map (keys are paths) or array of {path}
+//   - move_path rename targets inside update changes
+//   - a Claude-normalized single `file_path`
+//   - a freeform apply_patch text body (input/patch) with `*** {Add,Update,
+//     Delete} File:` / `*** Move to:` headers
+// An apply_patch call we cannot extract any path from is blocked (fail-closed):
+// an uninspectable mutation through the only enforcement layer is exactly the
+// catastrophe this guard exists to prevent.
+// ---------------------------------------------------------------------------
+
+const APPLY_PATCH_HEADER_RE =
+  /^\*\*\*\s+(?:Add File|Update File|Delete File|Move to):\s*(.+?)\s*$/gm;
+
+function collectPathsFromChanges(changes: unknown, out: Set<string>): void {
+  if (!changes || typeof changes !== 'object') return;
+  if (Array.isArray(changes)) {
+    for (const entry of changes) {
+      if (entry && typeof entry === 'object') {
+        const e = entry as Record<string, unknown>;
+        const p = e.path ?? e.file_path ?? e.filePath;
+        if (typeof p === 'string' && p) out.add(p);
+        const mv = e.move_path ?? e.movePath;
+        if (typeof mv === 'string' && mv) out.add(mv);
+      }
+    }
+    return;
+  }
+  // Object map: keys are target paths; an update value may carry a move_path.
+  for (const [key, val] of Object.entries(changes as Record<string, unknown>)) {
+    if (key) out.add(key);
+    if (val && typeof val === 'object') {
+      const v = val as Record<string, unknown>;
+      const mv = v.move_path ?? v.movePath;
+      if (typeof mv === 'string' && mv) out.add(mv);
+    }
+  }
+}
+
+function extractApplyPatchPaths(toolInput: Record<string, unknown>): string[] {
+  const paths = new Set<string>();
+
+  // (1) Claude-normalized single path.
+  if (typeof toolInput.file_path === 'string' && toolInput.file_path) {
+    paths.add(toolInput.file_path);
+  }
+
+  // (2) Structured fileChanges / changes map or array.
+  collectPathsFromChanges(toolInput.fileChanges, paths);
+  collectPathsFromChanges(toolInput.changes, paths);
+
+  // (3) Freeform apply_patch text body (NOT structured-change `content`, which
+  // is file content rather than patch text and could yield phantom paths).
+  for (const field of ['input', 'patch']) {
+    const body = toolInput[field];
+    if (typeof body === 'string' && body) {
+      for (const m of body.matchAll(APPLY_PATCH_HEADER_RE)) {
+        if (m[1]) paths.add(m[1].trim());
+      }
+    }
+  }
+
+  return Array.from(paths);
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -227,7 +304,14 @@ async function main(): Promise<void> {
       case 'shell':
       case 'shell_command':
       case 'exec_command': {
-        const command = String(toolInput.command ?? '');
+        // Codex shell tools may send command as an argv array (e.g.
+        // ["bash","-lc","rm -rf /"]) rather than a string. Join with spaces so
+        // the checks inspect the real command text instead of relying on the
+        // comma coercion of Array→String.
+        const rawCommand = toolInput.command;
+        const command = Array.isArray(rawCommand)
+          ? rawCommand.join(' ')
+          : String(rawCommand ?? '');
         if (command) checkBash(command);
         break;
       }
@@ -239,14 +323,35 @@ async function main(): Promise<void> {
         break;
       }
 
-      // File-mutation tools: Claude (Write/Edit/MultiEdit/NotebookEdit) + Codex (apply_patch)
+      // Claude file-mutation tools: carry a single Claude-style `file_path`.
       case 'Write':
       case 'Edit':
       case 'MultiEdit':
-      case 'NotebookEdit':
-      case 'apply_patch': {
+      case 'NotebookEdit': {
         const filePath = String(toolInput.file_path ?? '');
         if (filePath) checkWriteFence(toolName, filePath);
+        break;
+      }
+
+      // Codex apply_patch: target paths live in a fileChanges map / patch body,
+      // not a `file_path` field. Fence every extracted path; block if none.
+      case 'apply_patch': {
+        const paths = extractApplyPatchPaths(toolInput);
+        if (paths.length === 0) {
+          block('Blocked: apply_patch with no inspectable target path (fail-closed)');
+        }
+        // Relative patch paths are interpreted against the agent's working dir,
+        // not the hook process cwd. Resolve them against CTX_AGENT_DIR (the fence
+        // root) so a `../` escape is caught and an in-dir write isn't falsely
+        // blocked. (~/$HOME-prefixed paths are expanded downstream.)
+        const agentDir = process.env.CTX_AGENT_DIR;
+        for (const rawPath of paths) {
+          const target =
+            agentDir && !isAbsolute(rawPath) && !/^[~$]/.test(rawPath)
+              ? join(agentDir, rawPath)
+              : rawPath;
+          checkWriteFence('apply_patch', target);
+        }
         break;
       }
 
