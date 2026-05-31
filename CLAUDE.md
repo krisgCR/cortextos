@@ -26,6 +26,10 @@ npm test
 - `community/` — Community skills and agent catalog
 - `tests/` — Unit, integration, and E2E tests
 
+## Git
+
+- 🔴 **Never push to `upstream`** (`grandamenium/cortextos`). Push only to `origin` (`krisgCR/cortextos`, the fork). `upstream` is fetch-only — never `git push upstream`, and never target it when pushing branches, tags, or `main`.
+
 ## Code Style
 
 - TypeScript strict mode
