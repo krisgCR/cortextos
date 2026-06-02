@@ -2,6 +2,7 @@ import { join } from 'path';
 import { mkdirSync } from 'fs';
 import type { CtxEnv, WorkerStatus, WorkerStatusValue } from '../types/index.js';
 import { AgentPTY } from '../pty/agent-pty.js';
+import { CodexWorkerPty } from '../pty/codex-worker-pty.js';
 import { injectMessage } from '../pty/inject.js';
 
 /**
@@ -20,7 +21,7 @@ export class WorkerProcess {
   readonly dir: string;
   readonly parent: string | undefined;
 
-  private pty: AgentPTY | null = null;
+  private pty: AgentPTY | CodexWorkerPty | null = null;
   private status: WorkerStatusValue = 'starting';
   private spawnedAt: string;
   private exitCode: number | undefined;
@@ -43,7 +44,7 @@ export class WorkerProcess {
   /**
    * Spawn the worker Claude Code session with the given task prompt.
    */
-  async spawn(env: CtxEnv, prompt: string, config: { model?: string } = {}): Promise<void> {
+  async spawn(env: CtxEnv, prompt: string, config: { model?: string; runtime?: string } = {}): Promise<void> {
     // Ensure bus dirs exist so the worker can use cortextos bus commands
     try {
       mkdirSync(join(env.ctxRoot, 'inbox', this.name), { recursive: true });
@@ -52,7 +53,16 @@ export class WorkerProcess {
     } catch { /* ignore */ }
 
     const logPath = join(env.ctxRoot, 'logs', this.name, 'stdout.log');
-    this.pty = new AgentPTY(env, config, logPath);
+
+    // Runtime selection: Codex one-shot branch (spike-validated 2026-06-01).
+    // Claude path is the default and is byte-for-byte unchanged when runtime is unspecified.
+    if (config.runtime === 'codex') {
+      this.pty = new CodexWorkerPty(logPath, this.dir);
+    } else {
+      // Claude path: unchanged when runtime is unspecified.
+      // Only pass model to AgentPTY; runtime is a WorkerProcess-level selector.
+      this.pty = new AgentPTY(env, { model: config.model }, logPath);
+    }
 
     this.pty.onExit((code) => {
       this.exitCode = code;
