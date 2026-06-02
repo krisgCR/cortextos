@@ -22,6 +22,7 @@ export interface AgentCardData {
   currentTask?: string;
   tasksToday: number;
   runtime?: AgentRuntime;
+  model?: string;
 }
 
 interface AgentCardProps {
@@ -68,10 +69,15 @@ export function AgentCard({ agent }: AgentCardProps) {
             />
           </div>
 
-          {/* Org + runtime badges */}
-          <div className="flex items-center gap-1.5">
+          {/* Org + runtime + model badges */}
+          <div className="flex items-center gap-1.5 flex-wrap">
             {agent.org && <OrgBadge org={agent.org} />}
             {agent.runtime && <RuntimeBadge runtime={agent.runtime} />}
+            {agent.model && (
+              <span className="inline-flex items-center rounded-sm border px-1.5 py-0.5 text-[10px] font-mono text-muted-foreground">
+                {agent.model}
+              </span>
+            )}
           </div>
 
           {/* Current task */}

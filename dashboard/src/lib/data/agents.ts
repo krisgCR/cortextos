@@ -45,6 +45,17 @@ async function getAgentRuntime(name: string, org?: string): Promise<AgentRuntime
   return 'claude-code';
 }
 
+async function getAgentModel(name: string, org?: string): Promise<string | undefined> {
+  const agentDir = getAgentDir(name, org);
+  try {
+    const raw = await fs.readFile(path.join(agentDir, 'config.json'), 'utf-8');
+    const cfg = JSON.parse(raw) as { model?: string };
+    return typeof cfg.model === 'string' ? cfg.model : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Path resolution
 // ---------------------------------------------------------------------------
@@ -130,10 +141,11 @@ export async function discoverAgents(org?: string): Promise<AgentSummary[]> {
 
   const summaries = await Promise.all(
     agents.map(async (agent) => {
-      const [identity, hb, runtime] = await Promise.all([
+      const [identity, hb, runtime, model] = await Promise.all([
         getAgentIdentity(agent.name, agent.org),
         getHeartbeat(agent.name),
         getAgentRuntime(agent.name, agent.org),
+        getAgentModel(agent.name, agent.org),
       ]);
 
       let health: HealthStatus = 'down';
@@ -176,6 +188,7 @@ export async function discoverAgents(org?: string): Promise<AgentSummary[]> {
         role: identity.role,
         tasksToday,
         runtime,
+        model,
       };
 
       return summary;

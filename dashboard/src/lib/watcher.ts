@@ -2,11 +2,13 @@
 // Monitors CTX_ROOT for JSON/JSONL changes, syncs to SQLite, emits SSE events.
 
 import { EventEmitter } from 'events';
+import { existsSync, readFileSync } from 'fs';
 import { watch, type FSWatcher } from 'chokidar';
 import path from 'path';
 import { CTX_ROOT, getOrgs } from './config';
 import { syncFile, syncAll } from './sync';
-import type { SSEEvent } from './types';
+import { getHealthStatus } from './data/heartbeats';
+import type { SSEEvent, Heartbeat } from './types';
 
 // ---------------------------------------------------------------------------
 // globalThis singleton pattern (survives Next.js hot reloads)
@@ -29,22 +31,41 @@ if (process.env.NODE_ENV !== 'production') {
 // Watch path builder
 // ---------------------------------------------------------------------------
 
+// chokidar v5 dropped glob support, so glob patterns passed to watch() silently
+// match nothing — the dashboard would never live-update. Instead we watch the
+// stable parent directories (chokidar is recursive by default) and narrow to the
+// files we care about in handleFileChange via isRelevantPath().
 function getWatchPaths(): string[] {
-  const paths: string[] = [];
+  const candidates: string[] = [];
   const orgs = getOrgs();
 
   for (const org of orgs) {
     const orgBase = path.join(CTX_ROOT, 'orgs', org);
-    paths.push(path.join(orgBase, 'tasks', '**', '*.json'));
-    paths.push(path.join(orgBase, 'approvals', '**', '*.json'));
-    paths.push(path.join(orgBase, 'analytics', 'events', '**', '*.jsonl'));
+    candidates.push(path.join(orgBase, 'tasks'));
+    candidates.push(path.join(orgBase, 'approvals'));
+    candidates.push(path.join(orgBase, 'analytics', 'events'));
   }
 
-  // Flat paths (not org-scoped)
-  paths.push(path.join(CTX_ROOT, 'state', '*', 'heartbeat.json'));
-  paths.push(path.join(CTX_ROOT, 'inbox', '**', '*.json'));
+  // Flat dirs (not org-scoped)
+  candidates.push(path.join(CTX_ROOT, 'state'));
+  candidates.push(path.join(CTX_ROOT, 'inbox'));
 
-  return paths;
+  // Only watch dirs that exist now: chokidar won't fire for a path created after
+  // init, which mirrors the prior glob-base behaviour (the glob base dir also had
+  // to exist). The watcher re-inits on dashboard restart to pick up new dirs.
+  return candidates.filter((dir) => existsSync(dir));
+}
+
+// With directory watching, handleFileChange receives every file under the watched
+// trees. Mirror the old glob scope: only heartbeat.json and the three
+// event-bearing file shapes are synced/emitted; everything else is ignored.
+function isRelevantPath(filePath: string): boolean {
+  if (filePath.endsWith('/heartbeat.json')) return true;
+  if (filePath.includes('/tasks/') && filePath.endsWith('.json')) return true;
+  if (filePath.includes('/approvals/') && filePath.endsWith('.json')) return true;
+  if (filePath.includes('/analytics/events/') && filePath.endsWith('.jsonl')) return true;
+  if (filePath.includes('/inbox/') && filePath.endsWith('.json')) return true;
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -59,10 +80,17 @@ function categorizeFilePath(filePath: string): SSEEvent['type'] {
   return 'sync';
 }
 
-function handleFileChange(
+// Exported for the heartbeat-SSE payload contract test (P2a C5): the unit that
+// builds the SSE payload, tested directly so the assertion doesn't depend on
+// chokidar's awaitWriteFinish latency (an end-to-end watcher test covers the
+// init → emit path separately).
+export function handleFileChange(
   filePath: string,
   changeType: 'change' | 'add' | 'remove',
 ): void {
+  // chokidar v5 watches whole dirs; drop anything outside the tracked file shapes.
+  if (!isRelevantPath(filePath)) return;
+
   console.log(`[watcher] ${changeType}: ${filePath}`);
 
   // Sync the changed file to SQLite (skip for deletions)
@@ -75,9 +103,35 @@ function handleFileChange(
   }
 
   // Emit SSE event
+  const eventType = categorizeFilePath(filePath);
+  const data: Record<string, unknown> = { filePath, changeType };
+
+  // Enrich heartbeat events so agents-grid can update health in place.
+  // The grid reads event.data.agent + event.data.health; without these the
+  // live-update handler early-returns and the grid never updates.
+  if (eventType === 'heartbeat' && changeType !== 'remove') {
+    const agentName = path.basename(path.dirname(filePath));
+    try {
+      const raw = readFileSync(filePath, 'utf-8');
+      const hbRaw = JSON.parse(raw);
+      const hb: Heartbeat = {
+        agent: agentName,
+        org: hbRaw.org ?? '',
+        status: hbRaw.status ?? 'unknown',
+        current_task: hbRaw.current_task ?? undefined,
+        last_heartbeat: hbRaw.last_heartbeat ?? hbRaw.timestamp ?? undefined,
+      };
+      data.agent = agentName;
+      data.health = getHealthStatus(hb);
+      data.current_task = hb.current_task;
+    } catch {
+      // Non-fatal: emit with filePath/changeType only — grid will stay stale until next reload.
+    }
+  }
+
   const sseEvent: SSEEvent = {
-    type: categorizeFilePath(filePath),
-    data: { filePath, changeType },
+    type: eventType,
+    data,
     timestamp: new Date().toISOString(),
   };
 
@@ -100,6 +154,13 @@ function createWatcher(): FSWatcher {
   const watcher = watch(watchPaths, {
     ignoreInitial: true,
     persistent: true,
+    // Don't descend into per-agent binary/runtime noise under state/ (codex
+    // sockets, managed CODEX_HOME) or any vendored deps — isRelevantPath would
+    // drop them anyway, this just keeps the watch set lean.
+    ignored: (p: string) =>
+      p.includes('/node_modules/') ||
+      p.includes('/codex-home/') ||
+      p.endsWith('.sock'),
     awaitWriteFinish: {
       stabilityThreshold: 300,
       pollInterval: 100,
@@ -112,7 +173,7 @@ function createWatcher(): FSWatcher {
   watcher.on('error', (error) => console.error('[watcher] Error:', error));
 
   console.log(
-    `[watcher] Watching ${watchPaths.length} patterns under ${CTX_ROOT}`,
+    `[watcher] Watching ${watchPaths.length} directories under ${CTX_ROOT}`,
   );
   return watcher;
 }

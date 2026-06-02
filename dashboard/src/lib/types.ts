@@ -32,6 +32,7 @@ export interface AgentSummary {
   currentTask?: string;
   lastHeartbeat?: string;
   runtime?: AgentRuntime;
+  model?: string;
 }
 
 export interface Heartbeat {
@@ -103,7 +104,8 @@ export type EventType =
   | 'approval'
   | 'error'
   | 'milestone'
-  | 'heartbeat';
+  | 'heartbeat'
+  | 'routing';
 export type EventSeverity = 'info' | 'warning' | 'error';
 
 export interface Event {

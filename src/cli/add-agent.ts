@@ -21,8 +21,9 @@ export const addAgentCommand = new Command('add-agent')
   .option('--org <org>', 'Organization name')
   .option('--instance <id>', 'Instance ID', 'default')
   .option('--runtime <runtime>', `Agent runtime (${VALID_RUNTIMES.join(', ')})`, 'claude-code')
+  .option('--model <model>', 'Per-agent model (e.g. opus, sonnet, haiku, gpt-5-codex)')
   .description('Add a new agent to the organization')
-  .action(async (name: string, options: { template: string; org?: string; instance: string; runtime: string }) => {
+  .action(async (name: string, options: { template: string; org?: string; instance: string; runtime: string; model?: string }) => {
     if (!VALID_RUNTIMES.includes(options.runtime as RuntimeKind)) {
       console.error(`Error: --runtime must be one of: ${VALID_RUNTIMES.join(', ')} (got "${options.runtime}")`);
       process.exit(1);
@@ -120,7 +121,7 @@ export const addAgentCommand = new Command('add-agent')
     // Copy template files
     const templateDir = findTemplateDir(projectRoot, effectiveTemplate);
     if (templateDir) {
-      copyTemplateFiles(templateDir, agentDir, name, org);
+      copyTemplateFiles(templateDir, agentDir, name, org, options.model);
       console.log(`  Copied template files from ${effectiveTemplate}`);
     } else {
       // Create minimal files
@@ -176,6 +177,18 @@ export const addAgentCommand = new Command('add-agent')
         writeFileSync(configPath, JSON.stringify(existingCfg, null, 2) + '\n', 'utf-8');
       } catch (err) {
         console.error(`Warning: failed to set runtime field in config.json: ${(err as Error).message}`);
+      }
+    }
+
+    // Persist --model into config.json for ALL runtimes (NOT coupled to the runtime block above
+    // which only runs for non-claude-code agents — that would silently skip the entire claude roster).
+    if (options.model && existsSync(configPath)) {
+      try {
+        const existingCfg = JSON.parse(readFileSync(configPath, 'utf-8'));
+        existingCfg.model = options.model;
+        writeFileSync(configPath, JSON.stringify(existingCfg, null, 2) + '\n', 'utf-8');
+      } catch (err) {
+        console.error(`Warning: failed to set model field in config.json: ${(err as Error).message}`);
       }
     }
 
@@ -394,7 +407,7 @@ function findTemplateDir(projectRoot: string, template: string): string | null {
   return null;
 }
 
-function copyTemplateFiles(templateDir: string, agentDir: string, name: string, org: string): void {
+function copyTemplateFiles(templateDir: string, agentDir: string, name: string, org: string, model?: string): void {
   const files = readdirSync(templateDir);
   for (const file of files) {
     const srcPath = join(templateDir, file);
@@ -406,11 +419,12 @@ function copyTemplateFiles(templateDir: string, agentDir: string, name: string, 
         // Replace template placeholders
         content = content.replace(/\{\{agent_name\}\}/g, name);
         content = content.replace(/\{\{org\}\}/g, org);
+        content = content.replace(/\{\{model\}\}/g, model ?? '');
         content = content.replace(/\{\{current_timestamp\}\}/g, new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'));
         writeFileSync(destPath, content, 'utf-8');
       } else if (stat.isDirectory() && file !== 'node_modules') {
         mkdirSync(destPath, { recursive: true });
-        copyTemplateFiles(srcPath, destPath, name, org);
+        copyTemplateFiles(srcPath, destPath, name, org, model);
       }
     } catch { /* skip files that can't be read */ }
   }

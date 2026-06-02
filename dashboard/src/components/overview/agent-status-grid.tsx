@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { HealthDot } from '@/components/shared/health-dot';
 import { IconRobot, IconChevronRight } from '@tabler/icons-react';
+import { resolveAgentEmoji } from '@/lib/agent-emoji';
 import type { AgentSummary, Heartbeat } from '@/lib/types';
 
 interface AgentStatusGridProps {
@@ -41,7 +42,7 @@ export function AgentStatusGrid({ agents, heartbeats }: AgentStatusGridProps) {
                 className="group flex items-center gap-3 rounded-md px-2 py-2 hover:bg-muted/50 transition-colors"
               >
                 <div className="flex h-8 w-8 items-center justify-center rounded-md bg-muted text-sm">
-                  {agent.emoji || agent.name.charAt(0).toUpperCase()}
+                  {resolveAgentEmoji(agent.name, agent.emoji)}
                 </div>
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">

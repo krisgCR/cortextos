@@ -417,11 +417,15 @@ export class CodexAppServerPTY {
       }
 
       const spawnFn = this._spawnFn!;
-      const pty = spawnFn('codex', [
+      const codexArgs: string[] = [
         'app-server',
         '--enable', 'goals',
         '--listen', this._socketListenArg,
-      ], {
+      ];
+      if (this._config.model) {
+        codexArgs.push('-c', `model="${this._config.model}"`);
+      }
+      const pty = spawnFn('codex', codexArgs, {
         name: 'xterm-256color',
         cols: 200,
         rows: 50,

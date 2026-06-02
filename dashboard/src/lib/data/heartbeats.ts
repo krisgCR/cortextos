@@ -6,9 +6,12 @@ import path from 'path';
 import { CTX_ROOT, getHeartbeatPath } from '@/lib/config';
 import type { Heartbeat, HealthStatus, AgentHealth, HealthSummary } from '@/lib/types';
 
-// Default staleness thresholds (minutes)
-const STALE_THRESHOLD_MIN = 300; // 5 hours
-const DOWN_THRESHOLD_MIN = 1440; // 24 hours
+// Staleness thresholds (minutes).
+// Fast-checker watchdog fires every 50 min; active sessions heartbeat more frequently.
+// stale = 1.5× watchdog interval → live idle agents never falsely stale; dead agents surface within 75 min.
+// down  = 4h (one full agent-cron cycle silent) → definitively gone.
+const STALE_THRESHOLD_MIN = 75;  // 1.5× the 50-min fast-checker watchdog
+const DOWN_THRESHOLD_MIN = 240;  // 4 hours (one agent cron cycle)
 
 /**
  * Get heartbeat for a single agent. Returns null if not found.

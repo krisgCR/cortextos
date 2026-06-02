@@ -24,6 +24,7 @@ export default async function AgentsPage({
     currentTask: a.currentTask,
     tasksToday: (a as unknown as Record<string, number>).tasksToday ?? 0,
     runtime: a.runtime,
+    model: a.model,
   }));
 
   return (

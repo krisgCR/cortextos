@@ -2,6 +2,7 @@
 
 import { cn } from '@/lib/utils';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
+import { resolveAgentEmoji } from '@/lib/agent-emoji';
 
 export interface AgentAvatarProps {
   name: string;
@@ -24,12 +25,12 @@ export function AgentAvatar({
   showName = false,
   className,
 }: AgentAvatarProps) {
-  const fallbackText = emoji ?? name.charAt(0).toUpperCase();
+  const glyph = resolveAgentEmoji(name, emoji);
 
   return (
     <span className={cn('inline-flex items-center gap-2', className)}>
       <Avatar size={sizeMap[size]}>
-        <AvatarFallback>{fallbackText}</AvatarFallback>
+        <AvatarFallback>{glyph}</AvatarFallback>
       </Avatar>
       {showName && (
         <span className="text-sm font-medium">{name}</span>

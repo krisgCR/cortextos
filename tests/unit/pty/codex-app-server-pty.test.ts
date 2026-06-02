@@ -1186,3 +1186,62 @@ describe('CodexAppServerPTY thread/tokenUsage/updated → codex-tokens.jsonl', (
     })).not.toThrow();
   });
 });
+
+/**
+ * P2a §1.0b contract: per-agent codex model injection.
+ *
+ * The spike resolved Branch A — `codex app-server` honours a `-c model="<m>"`
+ * config override on the spawn command line. This pins that the override is
+ * threaded from `config.model` into the spawn args (and omitted entirely when
+ * no model is configured, so global resolution is unaffected).
+ *
+ * buildEnv() and waitForSocket() are stubbed on the instance: buildEnv touches
+ * the managed CODEX_HOME (real fs) and waitForSocket polls the socket — neither
+ * is relevant to the spawn-args contract, and stubbing keeps the test
+ * deterministic without driving a real app-server.
+ */
+describe('CodexAppServerPTY per-agent model injection (P2a §1.0b)', () => {
+  type StartableInternals = {
+    _spawnFn: (...args: unknown[]) => unknown;
+    buildEnv: () => Record<string, string>;
+    waitForSocket: () => Promise<void>;
+    startAppServer: () => Promise<void>;
+  };
+
+  function makeSpawnHarness(config: Record<string, unknown>) {
+    const spawnMock = vi.fn().mockReturnValue({ onData: vi.fn(), onExit: vi.fn() });
+    const pty = new CodexAppServerPTY(mockEnv, config);
+    const internals = pty as unknown as StartableInternals;
+    internals._spawnFn = spawnMock;
+    internals.buildEnv = () => ({});
+    internals.waitForSocket = () => Promise.resolve();
+    return { pty, spawnMock, internals };
+  }
+
+  it('passes -c model="<m>" to the codex app-server spawn when config.model is set', async () => {
+    const { spawnMock, internals } = makeSpawnHarness({ model: 'gpt-5-codex' });
+
+    await internals.startAppServer();
+
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    const [file, args] = spawnMock.mock.calls[0] as [string, string[]];
+    expect(file).toBe('codex');
+    expect(args).toContain('app-server');
+    // The model override is a `-c key="value"` pair, adjacent in the arg array.
+    const cfgIdx = args.indexOf('-c');
+    expect(cfgIdx).toBeGreaterThanOrEqual(0);
+    expect(args[cfgIdx + 1]).toBe('model="gpt-5-codex"');
+  });
+
+  it('omits the model override when config.model is unset (global resolution unaffected)', async () => {
+    const { spawnMock, internals } = makeSpawnHarness({});
+
+    await internals.startAppServer();
+
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    const [, args] = spawnMock.mock.calls[0] as [string, string[]];
+    expect(args).toContain('app-server');
+    expect(args).not.toContain('-c');
+    expect(args.some((a) => a.startsWith('model='))).toBe(false);
+  });
+});

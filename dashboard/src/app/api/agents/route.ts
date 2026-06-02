@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server';
 import fs from 'fs/promises';
 import path from 'path';
-import { getFrameworkRoot, getCTXRoot, getAllAgents } from '@/lib/config';
+import { getFrameworkRoot, getCTXRoot, getAllAgents, getAgentDir } from '@/lib/config';
 import { IPCClient } from '@/lib/ipc-client';
 import { getHeartbeat, getHealthStatus } from '@/lib/data/heartbeats';
 
@@ -24,11 +24,17 @@ export async function GET() {
     const agents = getAllAgents();
     const enriched = await Promise.all(
       agents.map(async (agent) => {
-        const hb = await getHeartbeat(agent.name);
+        const [hb, model] = await Promise.all([
+          getHeartbeat(agent.name),
+          fs.readFile(path.join(getAgentDir(agent.name, agent.org), 'config.json'), 'utf-8')
+            .then((raw) => (JSON.parse(raw) as { model?: string }).model)
+            .catch(() => undefined),
+        ]);
         const health = hb ? getHealthStatus(hb) : 'down';
         return {
           ...agent,
           health,
+          model,
           lastHeartbeat: hb?.last_heartbeat ?? undefined,
           currentTask: hb?.current_task ?? undefined,
           status: hb?.status ?? undefined,
