@@ -16,6 +16,12 @@ import { collectTelegramCommands, registerTelegramCommands } from '../bus/metric
 import { stripControlChars } from '../utils/validate.js';
 import { processMediaMessage } from '../telegram/media.js';
 import { stripBom } from '../utils/strip-bom.js';
+import {
+  FLOOR_MAP, TIER_MODEL_MAP, bucketOf, classifyRuntime, createBandit, matchRule, logRoutingDecision,
+} from '../routing/index.js';
+import { RuntimeCircuitBreaker } from '../routing/circuit-breaker.js';
+import type { Bandit, ComplexityBucket, Platform, Role, Tier } from '../routing/index.js';
+const ROUTING_TIER_ORDER: Tier[] = ['haiku', 'sonnet', 'opus'];
 
 type LogFn = (msg: string) => void;
 
@@ -43,6 +49,10 @@ export class AgentManager {
   // see overlapping registry state). Cleared after discoverAndStart()
   // finishes so the next clean restart starts from a known-good baseline.
   private daemonJustCrashed: boolean = false;
+
+  // ── Routing layer (lazy — only initialized when CTX_ROUTING_CALIBRATION is set) ──
+  private _routingBandit: Bandit | null = null;
+  private _routingBreaker: RuntimeCircuitBreaker | null = null;
 
   constructor(instanceId: string, ctxRoot: string, frameworkRoot: string, org: string) {
     this.instanceId = instanceId;
@@ -972,12 +982,62 @@ export class AgentManager {
     return this.cronSchedulers.get(agentName);
   }
 
-  // --- Worker management ---
+  // ── Routing helpers (lazy — only initialized when CTX_ROUTING_CALIBRATION is set) ──
 
-  /**
-   * Spawn an ephemeral worker session for a parallelized task.
-   */
-  async spawnWorker(name: string, dir: string, prompt: string, parent?: string, model?: string): Promise<void> {
+  private _getRoutingBandit(): Bandit {
+    if (!this._routingBandit) {
+      this._routingBandit = createBandit();
+      this._routingBandit.loadState(join(this.ctxRoot, 'routing'));
+    }
+    return this._routingBandit;
+  }
+
+  private _getRoutingBreaker(): RuntimeCircuitBreaker {
+    if (!this._routingBreaker) {
+      this._routingBreaker = new RuntimeCircuitBreaker();
+    }
+    return this._routingBreaker;
+  }
+
+  /** Select runtime + model via the calibration layer. Only called when CTX_ROUTING_CALIBRATION is set. */
+  private _selectRouting(role: Role, prompt: string): {
+    runtime: string; model: string | null; tier: Tier; platform: string;
+    bucket: string; decisionId: string; calibrated: boolean; reason: string;
+  } {
+    const bucket = bucketOf(prompt);
+    const decisionId = `routing-${Date.now()}-${role}`;
+    const bandit = this._getRoutingBandit();
+    const breaker = this._getRoutingBreaker();
+
+    const classified = classifyRuntime(prompt);
+    const codexOpen = breaker.isOpen('codex');
+    const wantsPlatform = codexOpen ? 'claude' : classified.platform;
+
+    const rule = matchRule(prompt, role, []); // No static rules wired yet; Phase 4.2 extension point.
+
+    let tier = bandit.selectTier(role, bucket);
+    let reason = `bandit:${bucket}`;
+    let calibrated = true;
+
+    if (rule?.tier) {
+      const floorIdx = ROUTING_TIER_ORDER.indexOf(FLOOR_MAP[role]);
+      const ruleTierIdx = ROUTING_TIER_ORDER.indexOf(rule.tier);
+      tier = ruleTierIdx >= floorIdx ? rule.tier : FLOOR_MAP[role];
+      reason = rule.reason ?? `routing-rule`;
+      calibrated = false;
+    }
+
+    const resolved = TIER_MODEL_MAP[tier];
+    // Platform comes from classifyRuntime (overridden by breaker), NOT from TIER_MODEL_MAP.
+    // TIER_MODEL_MAP always stores Claude models; Codex workers run `codex exec` and ignore
+    // the model arg, so a Codex decision carries no model (null) — never a misattributed Claude slug.
+    const platform = wantsPlatform;
+    const model = platform === 'codex' ? null : resolved.model;
+
+    return { runtime: platform, model, tier, platform, bucket, decisionId, calibrated, reason };
+  }
+
+  async spawnWorker(name: string, dir: string, prompt: string, parent?: string, model?: string, runtime?: string, role?: string): Promise<void> {
     if (this.workers.has(name)) {
       throw new Error(`Worker "${name}" is already running`);
     }
@@ -998,11 +1058,54 @@ export class AgentManager {
       projectRoot: this.frameworkRoot,
     };
 
-    const config = model ? { model } : {};
+    let resolvedModel = model;
+    let resolvedRuntime = runtime;
+    let logMeta: Parameters<typeof logRoutingDecision>[3] | null = null;
+
+    if (process.env.CTX_ROUTING_CALIBRATION && !model && !runtime) {
+      const agentRole: Role = (role as Role | undefined) ?? 'implement';
+      const decision = this._selectRouting(agentRole, prompt);
+      resolvedModel = decision.model ?? undefined;
+      resolvedRuntime = decision.runtime;
+      logMeta = {
+        decisionId: decision.decisionId,
+        role: agentRole,
+        bucket: decision.bucket as ComplexityBucket,
+        tier: decision.tier,
+        platform: decision.platform as Platform,
+        model: decision.model,
+        reason: decision.reason,
+        calibrated: decision.calibrated,
+      };
+    }
+
+    // Always log the routing decision when the flag is ON.
+    if (logMeta) {
+      try {
+        const paths = resolvePaths(name, this.instanceId, this.org);
+        logRoutingDecision(paths, name, this.org, logMeta);
+      } catch {
+        // Non-fatal — logging failure must not block the spawn.
+      }
+    }
+
+    const config: { model?: string; runtime?: string } = {};
+    if (resolvedModel) config.model = resolvedModel;
+    if (resolvedRuntime) config.runtime = resolvedRuntime;
 
     this.workers.set(name, worker);
 
-    worker.onDone((workerName) => {
+    const breaker = process.env.CTX_ROUTING_CALIBRATION ? this._getRoutingBreaker() : null;
+
+    worker.onDone((workerName, exitCode) => {
+      // Wire circuit-breaker failure tracking for Codex workers (flag-gated).
+      if (breaker && resolvedRuntime === 'codex') {
+        if (exitCode === 0) {
+          breaker.recordSuccess('codex');
+        } else {
+          breaker.recordFailure('codex');
+        }
+      }
       // Auto-remove finished workers after a short delay so list-workers
       // can still show the final status briefly before cleanup
       setTimeout(() => {
