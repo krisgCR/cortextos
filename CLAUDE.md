@@ -1,5 +1,27 @@
 # Contributing to cortextOS
 
+> This is a **customized fork** of `grandamenium/cortextos`, adapted for a single-overseer
+> autonomous fleet. Some upstream behaviors are deliberately changed — see the decisions below.
+> Authoritative record: `.planning/cortextos-overseer-fork-roadmap.md` (§2 decisions D1–D21) and
+> `.planning/cortextos-overseer-decision-journal.md`.
+
+## Fork Architecture Decisions
+
+- 🔴 **Telegram is DROPPED — the dashboard is the sole control plane (D5).** This fork does
+  **not** use Telegram for remote control. Do not build on, "fix," or wire up the Telegram path;
+  agents run with `telegram_polling: false` (or empty `BOT_TOKEN`/`CHAT_ID`). Remote control is
+  the Tailscale-reachable, auth-gated Next.js dashboard (approvals + compose bar), which removes
+  the bot-token injection surface. Native Claude remote control was also rejected — it doesn't fit
+  daemon-spawned PTY agents (D6).
+  - **Consequence — inherited templates are stale on this point.** The upstream agent templates
+    (`templates/*/CLAUDE.md`, `AGENTS.md`, the `onboarding` skill) still reference Telegram boot
+    messages, `send-telegram`, and `BOT_TOKEN`/`CHAT_ID` setup. Those instructions are **not the
+    fork's path** — treat them as legacy. Agent onboarding that requires "connect a Telegram bot"
+    is deferred with the dashboard-comms work, not a prerequisite to running an agent.
+- **Control plane is local-loopback bind + Tailscale Serve (P0/P1).** The dashboard binds
+  `127.0.0.1:3000`; phone reachability is via `tailscale serve` (Funnel OFF, tailnet-only).
+  Never `next dev`, `0.0.0.0`, or plain HTTP — see `.planning/p1-tailscale-serve-runbook.md`.
+
 ## Development Setup
 
 ```bash
