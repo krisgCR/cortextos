@@ -52,6 +52,8 @@ WINDOWS-IMPLEMENTATION-PLAN.md
 WINDOWS-SUPPORT-INVESTIGATION.md
 BRAINDUMP*.md
 AGENTS.md
+# ...except the repo-root AGENTS.md — the cross-tool source of truth that CLAUDE.md imports.
+!/AGENTS.md
 dashboard/screenshots/
 dashboard/test-*.py
 

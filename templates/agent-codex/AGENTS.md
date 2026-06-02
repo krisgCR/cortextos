@@ -174,15 +174,11 @@ cortextos bus log-event task task_completed info --meta '{"task_id":"<id>","agen
 
 After completing a research task or producing a significant output, ingest the result to the knowledge base so it persists for future sessions and other agents.
 
-**Post-task skill check:** After completing any complex task, ask yourself:
-- Did this require 8+ distinct tool calls for a coherent workflow?
-- Have I solved this same type of problem 3+ times across different sessions?
-- Does a skill for this already exist in `plugins/cortextos-agent-skills/skills/`?
+**Post-task skill check:** If a complex task took 8+ distinct tool calls, or you've solved this same problem 3+ times across sessions, and no skill for it exists in `plugins/cortextos-agent-skills/skills/` → read `plugins/cortextos-agent-skills/skills/auto-skill/SKILL.md` and draft a candidate.
 
-If yes to either of the first two, and no to the third → read `plugins/cortextos-agent-skills/skills/auto-skill/SKILL.md` and draft a skill candidate.
+CONSEQUENCE / TARGET: No task = invisible on dashboard (effectiveness 0%). Create at least 1 task for every significant piece of work (>10 min).
 
-CONSEQUENCE: Tasks without creation = invisible on dashboard. Your effectiveness score will be 0%.
-TARGET: Every significant piece of work (>10 minutes) = at least 1 task created.
+Full lifecycle (statuses, priorities, KPI logging): `plugins/cortextos-agent-skills/skills/tasks/SKILL.md`.
 
 ---
 
@@ -218,8 +214,7 @@ cortextos bus send-message $CTX_ORCHESTRATOR_AGENT normal "Human task created: [
 
 When the human task is marked complete, you receive an inbox message. Unblock and resume immediately.
 
-CONSEQUENCE: Leaving work undone without creating a human task = invisible blocker = system failure.
-TARGET: Every human-dependent blocker has a [HUMAN] task within 1 heartbeat of discovery.
+CONSEQUENCE / TARGET: An undone blocker without a human task = invisible blocker = silent stall. Create the [HUMAN] task within 1 heartbeat of discovery. Full routing (`--assignee human`, `--project human-tasks`) and instruction-writing guidance: `plugins/cortextos-agent-skills/skills/human-tasks/SKILL.md`.
 
 ### APPROVAL (permission — you can do it, but need sign-off first)
 
@@ -240,8 +235,7 @@ If approval is still pending after 4h in day mode, send one re-ping via Telegram
 
 Categories: `external-comms` | `financial` | `deployment` | `data-deletion` | `other`
 
-CONSEQUENCE: External actions without approval = system violation. The user will find out.
-TARGET: Every approval has a blocked parent task with blocked_by = approval ID.
+CONSEQUENCE / TARGET: External actions without approval = system violation. Every approval has a blocked parent task with blocked_by = approval ID. Full workflow and re-ping rules: `plugins/cortextos-agent-skills/skills/approvals/SKILL.md`.
 
 ---
 
@@ -280,11 +274,11 @@ MEMEOF
 
 ### Layer 2: Long-Term Memory — Consolidated Knowledge (MEMORY.md)
 
-Knowledge synthesised over time. Patterns that work, user preferences, decisions, corrections you received, negative patterns. Update on every heartbeat and at session end. When you update MEMORY.md, ingest it to your `memory-{agent}` KB collection.
+Knowledge synthesised over time: patterns that work, user preferences, decisions, corrections, negative patterns. Update on every heartbeat and at session end. After updating, ingest it to your `memory-{agent}` KB collection.
 
 ### Layer 3: Knowledge Base — Associative Memory (RAG/ChromaDB)
 
-Semantic vector store. Three collections: `memory-{agent}` (auto-reindexed at heartbeat), `private-{agent}` (your outputs), `shared-{org}` (org-wide).
+Semantic vector store. Three collections: `memory-{agent}` (auto-reindexed at heartbeat), `private-{agent}` (your outputs), `shared-{org}` (org-wide). Requires `GEMINI_API_KEY` in `orgs/$CTX_ORG/secrets.env`.
 
 ```bash
 # Re-index memory at heartbeat
@@ -298,10 +292,9 @@ cortextos bus kb-query "your question" --org $CTX_ORG --agent $CTX_AGENT_NAME
 cortextos bus kb-ingest /path/to/output --org $CTX_ORG --agent $CTX_AGENT_NAME --scope private
 ```
 
-**Requires:** `GEMINI_API_KEY` in `orgs/$CTX_ORG/secrets.env`
+CONSEQUENCE / TARGET: No query = repeat work; no ingest = lost institutional memory. Query before every task, ingest every significant output.
 
-CONSEQUENCE: Without querying, you repeat work the org already did. Without ingesting, the org permanently loses institutional memory.
-TARGET: Query before every task. Ingest every significant output. Memory collection updates itself at heartbeat.
+Layer details and heredoc templates: `plugins/cortextos-agent-skills/skills/memory/SKILL.md`, `plugins/cortextos-agent-skills/skills/knowledge-base/SKILL.md`.
 
 ---
 
@@ -327,8 +320,9 @@ cortextos bus log-event <category> <event> <severity> --meta '<json>'
 | Error or failure | error | <error_type> | error |
 | Significant decision made | action | decision_made | info |
 
-CONSEQUENCE: Events without logging are invisible in the Activity feed.
-TARGET: Every action in the table above = an event logged. Minimum 3 per active session.
+CONSEQUENCE / TARGET: Unlogged events are invisible in the Activity feed. Log every action in the table above; minimum 3 per active session.
+
+Full category/severity options and meta-payload patterns: `plugins/cortextos-agent-skills/skills/event-logging/SKILL.md`.
 
 ---
 
@@ -441,33 +435,17 @@ cortextos bus list-crons $CTX_AGENT_NAME
 
 **Remove:** `cortextos bus remove-cron $CTX_AGENT_NAME <name>`
 
-### Examples
+### Examples, test, and verify
 
-**Heartbeat every 6 hours:**
 ```bash
 cortextos bus add-cron $CTX_AGENT_NAME heartbeat 6h Read HEARTBEAT.md and follow its instructions.
-```
-
-**Daily report at 9am on weekdays:**
-```bash
 cortextos bus add-cron $CTX_AGENT_NAME daily-report "0 9 * * 1-5" Read plugins/cortextos-agent-skills/skills/morning-review/SKILL.md and run the daily report.
+cortextos bus test-cron-fire $CTX_AGENT_NAME heartbeat   # inject a cron's prompt now
+cortextos bus list-crons $CTX_AGENT_NAME                 # next_fire_at for each
+cortextos bus get-cron-log $CTX_AGENT_NAME               # execution history
 ```
 
-**Test a cron fires:**
-```bash
-cortextos bus test-cron-fire $CTX_AGENT_NAME heartbeat
-```
-
-### Verify
-
-```bash
-cortextos bus list-crons $CTX_AGENT_NAME            # next_fire_at for each
-cortextos bus get-cron-log $CTX_AGENT_NAME          # execution history
-ls "${CTX_ROOT}/state/${CTX_AGENT_NAME}/.crons-migrated"
-cat "${CTX_ROOT}/state/${CTX_AGENT_NAME}/crons.json"
-```
-
-For full CRUD (update, pause, resume, delete), see `plugins/cortextos-agent-skills/skills/cron-management/SKILL.md`.
+State files: `${CTX_ROOT}/state/${CTX_AGENT_NAME}/.crons-migrated` and `.../crons.json`. For full CRUD (update, pause, resume, delete, troubleshoot), see `plugins/cortextos-agent-skills/skills/cron-management/SKILL.md`.
 
 ---
 

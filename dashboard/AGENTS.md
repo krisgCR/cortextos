@@ -1,6 +1,27 @@
-@AGENTS.md
+@../AGENTS.md
 
 ---
+
+# Dashboard (cortextOS control plane)
+
+Next.js 14 app — the **sole** remote control plane for the fleet (auth-gated via NextAuth,
+reachable over Tailscale). Renders fleet health, cost, activity, approvals, and a compose bar.
+
+## Commands (run from `dashboard/`)
+
+```bash
+npm run dev -- --hostname 127.0.0.1   # dev server, loopback-only (see bind gotcha)
+npm run build                          # next build
+npm run start                          # next start (production)
+npm run lint                           # eslint
+npm test                               # vitest run --root .. dashboard/src
+npm run test:codex                     # codex cost-parser mutation gate
+```
+
+🔴 **Bind gotcha:** `next dev`/`next start` ignore the `HOSTNAME` env var and bind `0.0.0.0`.
+You **must** pass `--hostname 127.0.0.1` on the CLI for the loopback-only control plane. Never
+bind `0.0.0.0` or serve plain HTTP. Phone reachability is `tailscale serve` (Funnel OFF,
+tailnet-only) — see `.planning/p1-tailscale-serve-runbook.md`.
 
 ## Dashboard codex coverage
 

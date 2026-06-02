@@ -222,11 +222,11 @@ TARGET: Every approval has a blocked parent task with blocked_by = approval ID.
 
 ## Memory Protocol
 
-You have three memory layers. Think of them like human memory: working memory for what's happening now, long-term memory for durable knowledge, and an associative knowledge store for the whole organisation.
+You have three memory layers, like human memory: working memory for now, long-term memory for durable knowledge, and an associative knowledge store for the whole organisation.
 
 ### Layer 1: Daily Memory — Working Memory (memory/YYYY-MM-DD.md)
 
-This is your session journal. It survives crashes and context compactions. The goal is not to log activity — it is to capture enough context that you (or a fresh session) can resume intelligently without re-reading everything.
+Your session journal. Survives crashes and context compactions. The goal is not to log activity — it is to capture enough context that you (or a fresh session) can resume intelligently without re-reading everything.
 
 **Write at these checkpoints — not continuously:**
 - **Session start**: where things stand, what you are resuming and why
@@ -287,7 +287,7 @@ Update on every heartbeat and at session end. When you update MEMORY.md, ingest 
 
 ### Layer 3: Knowledge Base — Associative Memory (RAG/ChromaDB)
 
-The knowledge base is a semantic vector store (ChromaDB, Gemini Embedding 2). Think of it as your associative memory — not held in your head, but instantly searchable by meaning. It works like your own memory system: Gemini describes every non-text file (image, video, audio, PDF, Office doc) and embeds the description together with the content so you can find things by what they mean, not just what they literally say. Queries return the matching content plus full metadata: source path, similarity score, file type, chunk position, page number, timestamps.
+The knowledge base is a semantic vector store (ChromaDB, Gemini Embedding 2) — your associative memory, searchable by meaning. Gemini describes every non-text file (image, video, audio, PDF, Office doc) and embeds the description with the content, so you can find things by what they mean. Queries return matching content plus full metadata: source path, similarity score, file type, chunk position, page number, timestamps.
 
 **Three collections — different management models:**
 
@@ -409,91 +409,37 @@ Always include `msg_id` as reply_to — this auto-ACKs the original. Un-ACK'd me
 
 ## Crons
 
-Crons are **daemon-managed**. The cortextOS daemon reads `${CTX_ROOT}/state/${CTX_AGENT_NAME}/crons.json` on start and fires each cron by injecting its prompt into your session — no manual restoration needed.
+Crons are **daemon-managed**. The daemon reads `${CTX_ROOT}/state/${CTX_AGENT_NAME}/crons.json` on every agent start, schedules each entry, and fires them by injecting prompts into your PTY session (retry on injection failure: 1s, 4s, 16s; execution logged to `${CTX_ROOT}/state/${CTX_AGENT_NAME}/cron-execution.log`). They survive daemon and agent restarts and fire whether or not the session that created them is still running. No manual restoration needed.
 
-**View scheduled crons:**
-```bash
-cortextos bus list-crons $CTX_AGENT_NAME
-```
-
-**Add a recurring cron at runtime:** Use the `cron-management` skill. Do NOT use CronCreate or `/loop` for persistent scheduling — those are session-only and will not survive a restart.
-
-**Add a one-shot reminder:** Use `cortextos bus add-cron $CTX_AGENT_NAME --name <name> --schedule <ISO> --prompt "<text>"` (one-time fire).
-
-**Remove:** `cortextos bus remove-cron $CTX_AGENT_NAME <name>`
-
-For full CRUD protocol, see `.claude/skills/cron-management/SKILL.md`.
-
----
-
-## External Persistent Crons
-
-### The Model
-
-Persistent crons live in `${CTX_ROOT}/state/${CTX_AGENT_NAME}/crons.json`. The daemon owns this file — it reads it on every agent start, schedules each entry, and fires them by injecting prompts directly into your PTY session. Retry logic: 1s, 4s, 16s on injection failure. Execution is logged to `${CTX_ROOT}/state/${CTX_AGENT_NAME}/cron-execution.log`.
-
-Key properties:
-
-- **Survives daemon restarts.** State is on disk, not in memory.
-- **Survives agent restarts.** The daemon re-reads `crons.json` and re-schedules on every agent boot.
-- **Not session-local.** A cron defined here fires whether or not the session that created it is still running.
-
-### /loop vs Persistent Crons
-
-`/loop` is Claude Code's built-in for ephemeral polling inside a single session. Use it when you need something to repeat for the duration of one conversation (e.g., "check build status every 2 minutes until it passes"). It dies when the session ends.
-
-For ANY work that should survive restarts — heartbeats, daily reports, monitoring, experiment loops — use `cortextos bus add-cron`. That is the only way to guarantee the work runs forever.
+Do NOT use `CronCreate` or `/loop` for persistent scheduling — those are session-only and die with the session.
 
 | Need | Use |
 |------|-----|
 | Repeat for this session only | `/loop <interval> <prompt>` |
 | Persist across restarts | `cortextos bus add-cron` |
-| One-time future fire | `cortextos bus add-cron --schedule <ISO>` |
+| One-time future fire | `cortextos bus add-cron $CTX_AGENT_NAME --name <name> --schedule <ISO> --prompt "<text>"` |
 
-### Migration from config.json
+```bash
+# View scheduled crons (shows next_fire_at)
+cortextos bus list-crons $CTX_AGENT_NAME
+# Add a recurring cron
+cortextos bus add-cron $CTX_AGENT_NAME <name> <interval-or-cron-expr> <prompt>
+# Remove
+cortextos bus remove-cron $CTX_AGENT_NAME <name>
+# View execution history
+cortextos bus get-cron-log $CTX_AGENT_NAME
+# Test a cron fires correctly (injects its prompt immediately)
+cortextos bus test-cron-fire $CTX_AGENT_NAME heartbeat
+```
 
-Automatic. On agent boot, the daemon migrates `config.json` crons to `crons.json` once. A marker file `${CTX_ROOT}/state/${CTX_AGENT_NAME}/.crons-migrated` prevents re-runs. The source `config.json` is left untouched — non-destructive.
-
-You do not need to do anything. If you want to verify: check that `.crons-migrated` exists and `crons.json` is populated.
-
-### Examples
-
-**1. Heartbeat every 6 hours:**
+Examples:
 ```bash
 cortextos bus add-cron $CTX_AGENT_NAME heartbeat 6h Read HEARTBEAT.md and follow its instructions.
-```
-
-**2. Daily report at 9am on weekdays (cron expression):**
-```bash
 cortextos bus add-cron $CTX_AGENT_NAME daily-report "0 9 * * 1-5" Read .claude/skills/morning-review/SKILL.md and run the daily report.
-```
-
-**3. PR monitor every 4 hours, offset to avoid stampede:**
-```bash
 cortextos bus add-cron $CTX_AGENT_NAME pr-monitor "15 */4 * * *" Read .claude/skills/pr-monitor/SKILL.md and scan for new PRs.
 ```
 
-**4. Test that a cron fires correctly:**
-```bash
-cortextos bus test-cron-fire $CTX_AGENT_NAME heartbeat
-```
-This injects the cron prompt immediately — use it to confirm the wiring is correct before waiting for the first scheduled fire.
-
-### How to Verify
-
-```bash
-# List all scheduled crons for this agent (shows next_fire_at for each)
-cortextos bus list-crons $CTX_AGENT_NAME
-
-# View execution history
-cortextos bus get-cron-log $CTX_AGENT_NAME
-
-# Confirm migration ran
-ls "${CTX_ROOT}/state/${CTX_AGENT_NAME}/.crons-migrated"
-
-# Inspect crons.json directly
-cat "${CTX_ROOT}/state/${CTX_AGENT_NAME}/crons.json"
-```
+**Migration from config.json is automatic.** On boot the daemon migrates `config.json` crons to `crons.json` once (marker `${CTX_ROOT}/state/${CTX_AGENT_NAME}/.crons-migrated` prevents re-runs; source `config.json` is left untouched). You do nothing.
 
 For full CRUD (update, pause, resume, delete), see `.claude/skills/cron-management/SKILL.md`.
 
@@ -512,12 +458,12 @@ For restarting other agents, crash recovery, and PM2 troubleshooting, see `.clau
 
 ## Skills
 
-Your available skills are discovered at session start:
+Discover your available skills at session start:
 ```bash
 cortextos bus list-skills --format text
 ```
 
-Each skill is in `.claude/skills/<name>/SKILL.md`. When you encounter a scenario — getting blocked, needing approval, spawning an agent, rotating a credential — check your skills first before improvising.
+Each skill is in `.claude/skills/<name>/SKILL.md`. When you hit a scenario — getting blocked, needing approval, spawning an agent, rotating a credential — check your skills first before improvising.
 
 ---
 
@@ -527,7 +473,12 @@ Key paths:
 - Agent config: `orgs/{org}/agents/{agent}/config.json` — crons, model, session limits
 - Agent secrets: `orgs/{org}/agents/{agent}/.env` — BOT_TOKEN, CHAT_ID, ALLOWED_USER
 - Org secrets: `orgs/{org}/secrets.env` — shared API keys (GEMINI_API_KEY, OPENAI_API_KEY, etc.)
-- Logs: `~/.cortextos/$CTX_INSTANCE_ID/logs/$CTX_AGENT_NAME/` — activity, fast-checker, stdout, stderr
+- Logs: `~/.cortextos/$CTX_INSTANCE_ID/logs/$CTX_AGENT_NAME/` — `activity.log`, `fast-checker.log`, `stdout.log`, `stderr.log`
+
+### Spawning a New Agent
+
+Full workflow (BotFather token, getUpdates chat_id, `cortextos add-agent <name> --template agent`, write `.env` with BOT_TOKEN/CHAT_ID, `cortextos start <name>`) is in `.claude/skills/agent-management/SKILL.md`. After the new agent is running, hand it off to onboard itself — tell the user via Telegram:
+> "Your new agent is booting up! Switch to your Telegram chat with [bot name] and send `/onboarding` to start the setup process."
 
 For agent lifecycle (spawn, restart, config), see `.claude/skills/agent-management/SKILL.md`.
 For secrets and credentials, see `.claude/skills/env-management/SKILL.md`.
