@@ -1,0 +1,49 @@
+{
+  // ---------------------------------------------------------------------------
+  // Memory-leak guard (added 2026-06-21 after a 90GB VS Code OOM hard-restart).
+  //
+  // Root cause: with no workspace settings, VS Code's recursive file-watcher
+  // service watched dashboard/.next (554MB) while `next dev` (Next 16 Turbopack)
+  // rewrote that cache in a tight cold-compile loop. The watcher's in-memory file
+  // tree + event backlog ballooned to ~90GB and exhausted system RAM.
+  //
+  // VS Code's DEFAULT files.watcherExclude only covers node_modules/.git — it does
+  // NOT exclude .next, dist, or *.db-wal. Setting watcherExclude REPLACES the
+  // defaults, so the git/node_modules defaults are re-listed below alongside ours.
+  // ---------------------------------------------------------------------------
+  "files.watcherExclude": {
+    "**/.git/objects/**": true,
+    "**/.git/subtree-cache/**": true,
+    "**/.hg/store/**": true,
+    "**/node_modules/**": true,
+    "**/.next/**": true,
+    "**/dist/**": true,
+    "**/orgs/**": true,
+    "**/*.db": true,
+    "**/*.db-wal": true,
+    "**/*.db-shm": true,
+    "**/.planning/**": true
+  },
+
+  "search.exclude": {
+    "**/node_modules/**": true,
+    "**/.next/**": true,
+    "**/dist/**": true,
+    "**/*.db": true,
+    "**/*.db-wal": true,
+    "**/*.db-shm": true
+  },
+
+  // Hide pure build artifacts from the explorer (kept searchable above only where useful).
+  "files.exclude": {
+    "**/.next": true
+  },
+
+  // tsserver is memory-capped at 3GB by default, but excluding generated trees keeps
+  // its project graph small and avoids it re-walking the Turbopack cache.
+  "typescript.tsserver.watchOptions": {
+    "watchFile": "useFsEvents",
+    "watchDirectory": "useFsEvents",
+    "excludeDirectories": ["**/node_modules", "**/.next", "**/dist"]
+  }
+}

@@ -154,9 +154,13 @@ export const dashboardCommand = new Command('dashboard')
     };
 
     const startMode = options.build ? 'start' : 'dev';
+    // Force webpack in dev: Next 16's default Turbopack dev-compile balloons to
+    // 9GB+/~600 procs on this dashboard and once caused a 90GB OOM hard-restart
+    // (2026-06-21). `next start` (production) compiles ahead of time, so it's unaffected.
+    // Keep this in sync with dashboard/package.json's `dev` script.
     const startArgs = startMode === 'start'
       ? ['next', 'start', '--port', options.port, '--hostname', options.hostname]
-      : ['next', 'dev', '--port', options.port, '--hostname', options.hostname];
+      : ['next', 'dev', '--webpack', '--port', options.port, '--hostname', options.hostname];
 
     console.log(`\nDashboard starting on http://localhost:${options.port}`);
     console.log(`  Admin username: ${adminUsername}`);

@@ -148,6 +148,26 @@ export function handleFileChange(
 // Watcher factory
 // ---------------------------------------------------------------------------
 
+// Paths the watcher must never descend into: per-agent binary/runtime noise
+// (codex sockets, managed CODEX_HOME), vendored deps, build artifacts, and the
+// SQLite DB + its WAL sidecars. isRelevantPath would drop these anyway; excluding
+// them here keeps the watch set lean and forecloses any watch→write feedback loop
+// (defensive: the DB lives outside the watched tree, but never rely on that).
+// Exported for regression tests so the exclusion set can't silently drift.
+export function isIgnoredWatchPath(p: string): boolean {
+  return (
+    p.includes('/node_modules/') ||
+    p.includes('/.git/') ||
+    p.includes('/.next/') ||
+    p.includes('/dist/') ||
+    p.includes('/codex-home/') ||
+    p.endsWith('.sock') ||
+    p.endsWith('.db') ||
+    p.endsWith('.db-wal') ||
+    p.endsWith('.db-shm')
+  );
+}
+
 function createWatcher(): FSWatcher {
   const watchPaths = getWatchPaths();
 
@@ -160,13 +180,7 @@ function createWatcher(): FSWatcher {
   const watcher = watch(watchPaths, {
     ignoreInitial: true,
     persistent: true,
-    // Don't descend into per-agent binary/runtime noise under state/ (codex
-    // sockets, managed CODEX_HOME) or any vendored deps — isRelevantPath would
-    // drop them anyway, this just keeps the watch set lean.
-    ignored: (p: string) =>
-      p.includes('/node_modules/') ||
-      p.includes('/codex-home/') ||
-      p.endsWith('.sock'),
+    ignored: isIgnoredWatchPath,
     awaitWriteFinish: {
       stabilityThreshold: 300,
       pollInterval: 100,
