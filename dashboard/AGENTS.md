@@ -48,8 +48,39 @@ responsive (`/login` → `200`), flat over a 6-min run:
 npm run dev -- --hostname 127.0.0.1            # = `next dev --webpack` (safe default)
 ```
 
-🔴 **Do NOT use `npm run dev:turbopack`** (the bare `next dev` Turbopack path) for local dev until
-the Turbopack memory explosion is root-caused — it is the script that triggered the 90GB crash.
+🔴 **Do NOT use `npm run dev:turbopack`** (the bare `next dev` Turbopack path) for local dev — it
+is the script that triggered the 90GB crash. **Root cause is now understood and is an open upstream
+Turbopack bug, not something fixable in our config — so webpack stays the default indefinitely.**
+
+**Root cause (investigated 2026-06-21, static + upstream evidence; live repro deliberately skipped
+to avoid re-crashing the Mac).** Two independent Turbopack-specific mechanisms stack; neither is a
+Node heap leak, which is why `--max-old-space-size` does nothing (Turbopack memory is native/Rust):
+
+- **A — dev-process RAM blow-up + hang.** Turbopack dev grows ~**400 MB per compiled route** and
+  this app has **~40 routes** (~25 API groups + ~16 pages), with monotonic growth on a cold compile.
+  This is an **open, team-confirmed upstream pathology**, not our config:
+  vercel/next.js [#81161](https://github.com/vercel/next.js/issues/81161) ("each route adds ~400MB…
+  grows until OOM") and [#91396](https://github.com/vercel/next.js/issues/91396) ("dev server going
+  crazy on memory," `linear: turbopack` **team-confirmed**, open). timneutkens has publicly
+  acknowledged a Next 16 Turbopack dev memory leak.
+- **B — the 90GB VS Code amplification.** Next **16.2.4 ships `turbopackFileSystemCacheForDev: true`
+  by default** (`node_modules/next/dist/server/config-shared.js:263`) — the dev persistent FS cache
+  behind the "dev cache ate 20GB" reports. Turbopack churns a large cache into `.next/`; VS Code's
+  watcher (no `.next` exclude by default) indexed it → 90GB. Neutralized by the workspace
+  `.vscode/settings.json` excludes (commit `76aad92`).
+
+**Ruled out** (don't chase): cross-tree / symlink-escape traversal
+([#77102](https://github.com/vercel/next.js/discussions/77102),
+[#93556](https://github.com/vercel/next.js/issues/93556)) — the `turbopack.root: __dirname` pin
+holds and there are **zero symlinks under the dashboard tree**, with `.data/` sitting at repo root
+*outside* the pinned root; `better-sqlite3` re-bundling (no evidence; `serverExternalPackages` is the
+correct externalization); the `headers()` catch-all regex; and the original "~600 processes" figure
+(a `pgrep -P`-over-a-window artifact — Turbopack runs Rust as in-process threads, not child procs).
+
+**Re-enabling Turbopack:** blocked on upstream. Watch #81161 / #91396 for a fix; when one lands in a
+`next` bump, re-test `dev:turbopack` **only** under the bounded harness (`/tmp/ctx-leak-repro.sh`,
+pointed at `dev:turbopack`) with VS Code closed — never bare. Even then, keep
+`experimental.turbopackFileSystemCacheForDev: false` to suppress mechanism B.
 
 The chokidar watcher (`src/lib/watcher.ts`) only watches `CTX_ROOT/{state,inbox,orgs}` (tiny);
 the SQLite DB lives at `CTX_ROOT/dashboard/*.db` — **outside** every watched path, so WAL churn
