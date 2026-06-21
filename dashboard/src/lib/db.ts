@@ -46,7 +46,41 @@ function createDatabase(): Database.Database {
   return db;
 }
 
+// The `runtimes` table schema evolved during N3 development (native_id/cwd added,
+// started_at/observed_at removed). `CREATE TABLE IF NOT EXISTS` does NOT migrate an
+// existing table, so a DB created by an earlier N3 build keeps the stale shape and
+// every runtime sync fails ("table runtimes has no column named native_id"). Because
+// this table is a rebuildable read-cache of state/runtimes/*.json, the safe, self-
+// healing fix is to drop it on column drift and let the CREATE below recreate it;
+// syncAll() re-ingests the records from disk on the next watcher init.
+function reconcileRuntimesSchema(db: Database.Database): void {
+  const cols = (db.pragma('table_info(runtimes)') as { name: string }[]).map(
+    (c) => c.name,
+  );
+  if (cols.length === 0) return; // table doesn't exist yet — CREATE handles it
+  // Keep in sync with the CREATE TABLE runtimes statement below.
+  const expected = [
+    'run_id',
+    'runtime',
+    'state',
+    'tree',
+    'degraded',
+    'updated_at',
+    'native_id',
+    'cwd',
+  ];
+  const matches =
+    cols.length === expected.length && expected.every((c) => cols.includes(c));
+  if (!matches) {
+    // Dropping is safe: the data is a cache rebuilt from disk by syncAll().
+    db.exec('DROP TABLE IF EXISTS runtimes;');
+  }
+}
+
 function initializeSchema(db: Database.Database): void {
+  // Reconcile drifted cache-table schemas before the idempotent CREATEs below.
+  reconcileRuntimesSchema(db);
+
   db.exec(`
     CREATE TABLE IF NOT EXISTS tasks (
       id TEXT PRIMARY KEY,
