@@ -789,3 +789,295 @@ export interface AgentStatus {
   crashCount?: number;
   model?: string;
 }
+
+// ---------------------------------------------------------------------------
+// D24 Runtime-Boundary Protocol — Four-Type Contract
+// ---------------------------------------------------------------------------
+// These types define the uniform protocol every runtime adapter must emit.
+// See: .planning/cortextos-native-integration-strategy.md §D24
+//
+// `Runtime` is a superset of `Platform` ('claude' | 'codex') in
+// src/routing/types.ts — Platform remains the P2a bandit-routing discriminant;
+// Runtime is the finer-grained adapter identity used at spawn time and in
+// RuntimeDriver implementations.
+
+/**
+ * Identifies which runtime adapter produced an observation or owns a run.
+ * Superset of Platform ('claude' | 'codex') from src/routing/types.ts.
+ * Do NOT redefine or merge Platform — they serve different layers.
+ */
+export type Runtime =
+  | 'claude-bg'
+  | 'codex-app-server'
+  | 'codex-exec'
+  | 'hermes'
+  | 'workflow-observer'
+  | 'claude-discovery';
+
+/**
+ * How well a runtime supports a particular capability.
+ * 'native'   — first-class platform support, no workarounds
+ * 'emulated' — achievable via cortextOS shims but not platform-native
+ * 'degraded' — partial; may lose fidelity or require polling
+ * 'none'     — capability is absent; callers must not rely on it
+ * 'unknown'  — adapter has not been probed yet
+ */
+export type CapabilityGrade = 'native' | 'emulated' | 'degraded' | 'none' | 'unknown';
+
+/** How well this runtime can observe what a run is doing. */
+export interface ObserveCapabilities {
+  /** Per-turn output visibility. */
+  process: CapabilityGrade;
+  /** Individual turn start/end events. */
+  turn: CapabilityGrade;
+  /** Tool-call observation granularity. */
+  tool: CapabilityGrade;
+  /** Visibility into nested subagent/workflow descendants. */
+  descendants: CapabilityGrade;
+  /** Token + cost accounting fidelity. */
+  cost: CapabilityGrade;
+}
+
+/** How well this runtime can steer or stop a run that is already active. */
+export interface ControlCapabilities {
+  /** Inject a new turn into an active run. */
+  submitTurn: CapabilityGrade;
+  /** Modify a turn that is currently being executed. */
+  steerActiveTurn: CapabilityGrade;
+  /** Cancel the current turn without terminating the run. */
+  interruptTurn: CapabilityGrade;
+  /** Fully stop the run (process + session). */
+  terminateRun: CapabilityGrade;
+  /** Drain in-flight work before shutdown. */
+  drain: CapabilityGrade;
+}
+
+/** How well this runtime can recover from failures or handoff a run. */
+export interface RecoveryCapabilities {
+  /** Reopen an existing conversation from a prior session. */
+  resumeConversation: CapabilityGrade;
+  /** Attach to a process that outlived the daemon (e.g. after crash). */
+  reattachLiveProcess: CapabilityGrade;
+  /** Roll back file-system state to a checkpoint. */
+  rewindFiles: CapabilityGrade;
+  /** Claim a run whose prior holder died without finishing. */
+  adoptOrphan: CapabilityGrade;
+}
+
+/** File-system and process isolation guarantees for runs under this runtime. */
+export interface IsolationCapabilities {
+  /**
+   * Isolation root for each run.
+   * 'none'           — all runs share the same cwd
+   * 'cwd'            — each run gets a unique working directory
+   * 'worktree'       — each run is a separate git worktree
+   * 'container'      — each run runs in an isolated container
+   */
+  root: 'none' | 'cwd' | 'worktree' | 'container';
+  /**
+   * How descendant (nested) runs share isolation scope.
+   * 'shared'          — descendants inherit the parent's root
+   * 'worktree'        — each descendant gets its own worktree
+   * 'runtime-defined' — the runtime decides per-descendant
+   */
+  descendants: 'shared' | 'worktree' | 'runtime-defined';
+}
+
+/** Aggregated capability envelope for a runtime adapter. */
+export interface RuntimeCapabilities {
+  observe: ObserveCapabilities;
+  control: ControlCapabilities;
+  recovery: RecoveryCapabilities;
+  isolation: IsolationCapabilities;
+}
+
+/**
+ * Per-capability metadata attachable to a runtime driver entry.
+ * Describes latency, transport, durability, and billing properties.
+ */
+export interface CapabilityMetadata {
+  /** Temporal scope of the capability: which grain does it apply to? */
+  scope: 'session' | 'turn' | 'task' | 'child' | 'workflow';
+  /** Human-readable latency estimate for control operations (e.g. "~200ms"). */
+  controlLatency?: string;
+  /** Delivery guarantee for control signals (e.g. "at-most-once"). */
+  controlGuarantee?: string;
+  /** How event data reaches the daemon. */
+  eventTransport: 'push' | 'poll' | 'inferred';
+  /** Persistence guarantee for events (e.g. "write-ahead log, 7d retention"). */
+  durability?: string;
+  /** How stale the reported state can be (e.g. "≤30s polling lag"). */
+  freshness?: string;
+  /** Runtime adapter version string for diagnostics. */
+  runtimeVersion?: string;
+  /** Maximum runs this adapter can manage in parallel. */
+  maxConcurrency?: number;
+  /**
+   * Whether budgets are enforced by the platform natively or by cortextOS.
+   * 'native'    — platform tracks and enforces; cortextOS observes only
+   * 'cortextos' — cortextOS injects limits at dispatch; platform is unaware
+   */
+  budgetOrigin: 'native' | 'cortextos';
+  /** Auth/billing mode string for diagnostics (e.g. "oauth-subscription"). */
+  authBillingMode?: string;
+}
+
+/**
+ * Which billing pool a run draws from.
+ * Required on RunSpec and RunStatus so N4 can enforce cross-pool budget limits.
+ */
+export type BillingPool = 'subscription' | 'metered' | 'unknown';
+
+/**
+ * Fencing token — opaque string issued to the current run holder.
+ * A new epoch mints a new token; stale holders are rejected on heartbeat.
+ */
+export type FencingToken = string;
+
+/**
+ * Monotonically increasing ownership epoch for a worktree/run slot.
+ * Bumped every time ownership transfers; used to detect stale holders.
+ */
+export type OwnershipEpoch = number;
+
+/**
+ * Lease record held by the active owner of a worktree or run slot.
+ * Holders must refresh `heartbeat` at least every epoch window or lose the lease.
+ */
+export interface RunLease {
+  /** Absolute path to the worktree this lease covers. */
+  worktree: string;
+  /** run_id of the holder that acquired this lease. */
+  holderRunId: string;
+  /** Fencing token — changes on each epoch transition. */
+  fencingToken: FencingToken;
+  /** Epoch counter at acquisition time. */
+  epoch: OwnershipEpoch;
+  /** ISO-8601 timestamp of the most recent heartbeat from the holder. */
+  heartbeat: string; // ISO-8601
+}
+
+/**
+ * Desired, immutable specification for a single run.
+ * Created once at dispatch time; never mutated after creation.
+ *
+ * Budget fields (`budget_tokens`, `budget_cost_usd`) are required so N4
+ * can enforce cross-pool spending limits before the run consumes resources.
+ */
+export interface RunSpec {
+  /** Globally unique run identifier (UUIDv4 recommended). */
+  run_id: string;
+  /** run_id of the parent run that spawned this one, if any. */
+  parent_run_id?: string;
+  /** Runtime adapter that will execute this run. */
+  runtime: Runtime;
+  /** Model identifier to use (e.g. "claude-opus-4-5", "gpt-4o"). */
+  model: string;
+  /** Absolute working directory for the run's file operations. */
+  cwd: string;
+  /** Worktree path when isolation.root === 'worktree'. */
+  worktree?: string;
+  /** ISO-8601 deadline after which the run must be stopped. */
+  deadline?: string; // ISO-8601
+  /** Client-supplied key preventing duplicate dispatches on retry. */
+  idempotency_key: string;
+  /** Tool-call categories that require a human approval gate before proceeding. */
+  approval_boundaries?: string[];
+  /** Reference to a verification contract the run must satisfy before completion. */
+  verification_contract?: string;
+  /**
+   * Billing pool this run draws from.
+   * Required so N4 can enforce cross-pool budget limits.
+   */
+  billing_pool: BillingPool;
+  /**
+   * Maximum tokens this run may consume (input + output).
+   * Required so N4 can enforce cross-pool budget limits.
+   */
+  budget_tokens?: number;
+  /**
+   * Maximum USD cost this run may incur.
+   * Required so N4 can enforce cross-pool budget limits.
+   */
+  budget_cost_usd?: number;
+}
+
+/**
+ * Observed, mutable state snapshot for a run.
+ * Updated as the run progresses; never replaces RunSpec.
+ */
+export interface RunStatus {
+  /** Matches RunSpec.run_id. */
+  run_id: string;
+  /** Current lifecycle state of the run. */
+  state: 'working' | 'blocked' | 'done' | 'failed' | 'stopped';
+  /** Human-readable label for the current phase (e.g. "planning", "executing"). */
+  phase?: string;
+  /** Total tokens consumed so far (input + output). */
+  tokens?: number;
+  /** Total cost incurred so far (USD). */
+  cost?: number;
+  /** Billing pool this run is drawing from. */
+  billing_pool: BillingPool;
+  /** ISO-8601 timestamp of the most recent heartbeat from the run. */
+  heartbeat: string; // ISO-8601
+  /** Remaining token budget (if budget_tokens was specified in RunSpec). */
+  budget_remaining_tokens?: number;
+  /** Remaining cost budget in USD (if budget_cost_usd was specified in RunSpec). */
+  budget_remaining_cost_usd?: number;
+  /** Active worktree lease, present when the run holds an exclusive lease. */
+  lease?: RunLease;
+  /** Ownership epoch at the time this snapshot was taken. */
+  ownership_epoch?: OwnershipEpoch;
+}
+
+/** Discriminant for runtime event payloads. */
+export type RuntimeEventKind = 'turn' | 'tool-call' | 'artifact' | 'lifecycle';
+
+/**
+ * A single append-only evidence record emitted by a runtime adapter.
+ * Every adapter must produce RuntimeEvents on the bus so the daemon can
+ * observe runs without polling each runtime directly.
+ *
+ * Designed append-only — existing events must never be mutated.
+ * `session_id` is the native run correlation key (e.g. claude session UUID).
+ */
+export interface RuntimeEvent {
+  /** Category of the event. */
+  kind: RuntimeEventKind;
+  /** run_id from the originating RunSpec. */
+  run_id: string;
+  /** Native session/run correlation key from the platform. */
+  session_id: string;
+  /** ISO-8601 timestamp when the event occurred. */
+  timestamp: string; // ISO-8601
+  /** Arbitrary event-specific data. Callers must not rely on shape. */
+  payload: Record<string, unknown>;
+}
+
+/**
+ * Uniform adapter interface every runtime driver must implement.
+ * The daemon calls these methods; adapters translate to platform-specific APIs.
+ */
+export interface RuntimeDriver {
+  /** Adapter's own runtime identifier. */
+  runtime: Runtime;
+  /** Self-reported capability envelope. */
+  capabilities: RuntimeCapabilities;
+  /** Dispatch a new run per the given spec. Resolves when the run is accepted. */
+  dispatch(spec: RunSpec): Promise<void>;
+  /** Fetch the current status snapshot for a run, or null if not found. */
+  getStatus(run_id: string): Promise<RunStatus | null>;
+  /** List all runs this adapter is currently managing. */
+  listRuns(): Promise<RunStatus[]>;
+  /**
+   * Parse raw output from `claude agents list --json` (or equivalent)
+   * into a RunStatus. Each adapter supplies its own shape mapping.
+   */
+  parseAgentsJson(raw: unknown): RunStatus;
+  /**
+   * Parse a raw hook-event payload from the platform (e.g. claude Code hook
+   * or Codex event) into a RuntimeEvent.
+   */
+  parseHookEvent(raw: unknown): RuntimeEvent;
+}

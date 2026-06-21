@@ -7,7 +7,9 @@ auto-restart and crash recovery.
 > This is a **customized fork** of `grandamenium/cortextos`, adapted for a single-overseer
 > autonomous fleet. Some upstream behaviors are deliberately changed — see **Fork Decisions**
 > below. Authoritative record: `.planning/cortextos-overseer-fork-roadmap.md` (§2 decisions
-> D1–D21) and `.planning/cortextos-overseer-decision-journal.md`.
+> **D1–D25**) and `.planning/cortextos-overseer-decision-journal.md`.
+>
+> 🔵 **Read `.planning/cortextos-native-integration-strategy.md` first** — it defines **the Seam (D22–D25, 2026-06-13)**: this fork owns the FLEET (cross-model runtimes, dashboard, human gates, policy/router, bus); **Anthropic native owns WITHIN-agent orchestration** (Dynamic Workflows, nested subagents, worktree isolation) used *inside* our agents, and **Claude session supervision is delegated to native `claude agents`** (D23). Don't hand-build orchestration/supervision the platform now ships. **Phase N** (roadmap §7) is underway: **N1** (native API validated), **N1.5** (subscription billing confirmed) and **N2** (runtime-boundary protocol — `src/runtime/`) are landed; **N3 (dashboard federation) is next**.
 
 This file is the source of truth for agents working **on this repo**. `CLAUDE.md` imports it.
 
@@ -59,6 +61,7 @@ CLI. Never bind `0.0.0.0` or serve plain HTTP; phone reachability is via `tailsc
 
 ## Fork Decisions (constrain what you change)
 
+- 🔵 **The Seam — fleet vs. task (D22–D25).** cortextOS owns the **fleet**; **Anthropic native owns within-agent orchestration.** Concretely: (1) **don't hand-build** decompose/fan-out/verify/loop machinery — that's **Dynamic Workflows + nested subagents** run *inside* a supervised agent; (2) **don't build Claude PTY supervision** — dispatch/enumerate/stop Claude sessions via native **`claude agents`** (`--json` is scriptable, no TTY) (D23); (3) **don't build worktree-per-task cages** — use native `isolation:'worktree'`; (4) **DO build/keep:** the cross-model adapters (`src/pty/` Codex/Hermes — Agent View is Claude-only), the **runtime-boundary protocol** (D24, the spine — uniform `RuntimeBoundaryRecord` every adapter emits), the federated dashboard, the bandit router, the HMAC bus, and **aggregate budget/cancel at the dispatch boundary** (D25). The HMAC bus stays for **cross-model** peer comms (Agent Teams rejected — Claude-only). Native runs are **bounded atomic units**, observable via `~/.claude/projects/<session>/subagents/workflows/<runId>/`. Verified by spike 2026-06-13.
 - 🔴 **Telegram is DROPPED — the dashboard is the sole control plane (D5).** Do not build on,
   "fix," or wire up Telegram for remote control; agents run with `telegram_polling: false`.
   Remote control is the auth-gated, Tailscale-reachable dashboard (approvals + compose bar).
