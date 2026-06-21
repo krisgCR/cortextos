@@ -1,4 +1,9 @@
 node_modules/
+# npm-only repo (tracks upstream npm fork) — block stray pnpm/yarn artifacts.
+# Enforced at install time by the "preinstall" guard in package.json.
+pnpm-lock.yaml
+pnpm-workspace.yaml
+yarn.lock
 .claude/
 !.claude/commands/
 !.claude/commands/**
