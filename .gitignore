@@ -38,6 +38,8 @@ agents/*/memory/
 # Test artifacts
 test-results/
 *.log
+# Dashboard SQLite cache fallback (db.ts uses .data/ when CTX_ROOT is unset) — runtime data, never commit
+.data/
 # Spurious directory created when ${APPDATA} env var unexpanded during npm link on Windows
 ${APPDATA}/
 
