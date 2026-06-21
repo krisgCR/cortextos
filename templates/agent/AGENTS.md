@@ -407,7 +407,7 @@ Always include `msg_id` as reply_to — this auto-ACKs the original. Un-ACK'd me
 
 ---
 
-## Crons
+## External Persistent Crons
 
 Crons are **daemon-managed**. The daemon reads `${CTX_ROOT}/state/${CTX_AGENT_NAME}/crons.json` on every agent start, schedules each entry, and fires them by injecting prompts into your PTY session (retry on injection failure: 1s, 4s, 16s; execution logged to `${CTX_ROOT}/state/${CTX_AGENT_NAME}/cron-execution.log`). They survive daemon and agent restarts and fire whether or not the session that created them is still running. No manual restoration needed.
 

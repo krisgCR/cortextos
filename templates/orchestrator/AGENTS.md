@@ -446,9 +446,21 @@ Persistent crons live in `${CTX_ROOT}/state/${CTX_AGENT_NAME}/crons.json`. The d
 
 Automatic. On agent boot, the daemon migrates `config.json` crons to `crons.json` once. A marker file `${CTX_ROOT}/state/${CTX_AGENT_NAME}/.crons-migrated` prevents re-runs; the source `config.json` is left untouched (non-destructive). You do not need to do anything.
 
+### Examples
+
+```bash
+# 1. Heartbeat every 6 hours
+cortextos bus add-cron $CTX_AGENT_NAME heartbeat 6h Read HEARTBEAT.md and follow its instructions.
+# 2. Daily fleet report at 9am on weekdays (cron expression)
+cortextos bus add-cron $CTX_AGENT_NAME fleet-report "0 9 * * 1-5" Read .claude/skills/system-diagnostics/SKILL.md and post the daily fleet report.
+# 3. Approval sweep every 4 hours, offset to avoid stampede
+cortextos bus add-cron $CTX_AGENT_NAME approval-sweep "15 */4 * * *" Read .claude/skills/approvals/SKILL.md and clear the approval queue.
+```
+
 ### Test and verify
 
 ```bash
+cortextos bus list-crons $CTX_AGENT_NAME             # scheduled crons + next_fire_at
 cortextos bus test-cron-fire $CTX_AGENT_NAME <name>   # inject the prompt now to confirm wiring
 cortextos bus get-cron-log $CTX_AGENT_NAME            # execution history
 ```

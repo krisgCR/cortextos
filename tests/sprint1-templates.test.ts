@@ -4,6 +4,17 @@ import { join } from 'path';
 
 const TEMPLATE_ROOT = join(__dirname, '..', 'templates');
 
+// Template CLAUDE.md files follow the best-practice import pattern (`@AGENTS.md`),
+// so the real instruction content lives in AGENTS.md. Resolve the import so these
+// checks assert the effective instructions an agent receives, not one file's bytes.
+function readInstructions(dir: string): string {
+  const claude = readFileSync(join(dir, 'CLAUDE.md'), 'utf-8');
+  if (/@AGENTS\.md/.test(claude)) {
+    return `${claude}\n${readFileSync(join(dir, 'AGENTS.md'), 'utf-8')}`;
+  }
+  return claude;
+}
+
 describe('Sprint 1: Template Completeness', () => {
   describe('Agent template', () => {
     const agentDir = join(TEMPLATE_ROOT, 'agent');
@@ -56,14 +67,14 @@ describe('Sprint 1: Template Completeness', () => {
       }
     });
 
-    it('CLAUDE.md has first boot check', () => {
-      const content = readFileSync(join(agentDir, 'CLAUDE.md'), 'utf-8');
+    it('instructions (CLAUDE.md → @AGENTS.md) have first boot check', () => {
+      const content = readInstructions(agentDir);
       expect(content).toContain('First Boot Check');
       expect(content).toContain('ONBOARDING');
     });
 
-    it('CLAUDE.md references cortextos bus commands', () => {
-      const content = readFileSync(join(agentDir, 'CLAUDE.md'), 'utf-8');
+    it('instructions (CLAUDE.md → @AGENTS.md) reference cortextos bus commands', () => {
+      const content = readInstructions(agentDir);
       expect(content).toContain('cortextos bus');
       expect(content).not.toContain('bash $CTX_FRAMEWORK_ROOT/bus/');
     });
@@ -171,8 +182,8 @@ describe('Sprint 1: Template Completeness', () => {
       }
     });
 
-    it('CLAUDE.md has orchestrator-specific content', () => {
-      const content = readFileSync(join(orchDir, 'CLAUDE.md'), 'utf-8');
+    it('instructions (CLAUDE.md → @AGENTS.md) have orchestrator-specific content', () => {
+      const content = readInstructions(orchDir);
       expect(content).toContain('Orchestrator');
       expect(content).toContain('coordination');
       expect(content).toContain('Decompose');
@@ -251,8 +262,8 @@ describe('Sprint 1: Template Completeness', () => {
       }
     });
 
-    it('CLAUDE.md has analyst-specific content', () => {
-      const content = readFileSync(join(analystDir, 'CLAUDE.md'), 'utf-8');
+    it('instructions (CLAUDE.md → @AGENTS.md) have analyst-specific content', () => {
+      const content = readInstructions(analystDir);
       expect(content).toContain('Analyst');
       expect(content).toContain('metrics');
     });

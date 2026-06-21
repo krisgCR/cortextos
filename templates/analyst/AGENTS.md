@@ -423,12 +423,13 @@ For full CRUD protocol, see `.claude/skills/cron-management/SKILL.md`.
 
 ## External Persistent Crons
 
-Persistent crons live in `${CTX_ROOT}/state/${CTX_AGENT_NAME}/crons.json`. The daemon owns this file — it reads it on every agent/daemon start, schedules each entry, and fires by injecting prompts into your PTY session (retry: 1s, 4s, 16s on injection failure; logged to `cron-execution.log`). They survive daemon restarts, agent restarts, and context compactions, and are NOT session-local. `config.json` crons are migrated to `crons.json` automatically once on boot (non-destructive). Use `cortextos bus add-cron` for anything that must survive restarts; reserve `/loop` for single-session polling. Confirm with `cortextos bus list-crons $CTX_AGENT_NAME` and inspect history with `cortextos bus get-cron-log $CTX_AGENT_NAME`.
+Persistent crons live in `${CTX_ROOT}/state/${CTX_AGENT_NAME}/crons.json`. The daemon owns this file — it reads it on every agent/daemon start, schedules each entry, and fires by injecting prompts into your PTY session (retry: 1s, 4s, 16s on injection failure; logged to `cron-execution.log`). They survive daemon restarts, agent restarts, and context compactions, and are NOT session-local. `config.json` crons are migrated to `crons.json` automatically once on boot (a `.crons-migrated` marker prevents re-runs; non-destructive). Use `cortextos bus add-cron` for anything that must survive restarts; reserve `/loop` for single-session polling. Confirm with `cortextos bus list-crons $CTX_AGENT_NAME` and inspect history with `cortextos bus get-cron-log $CTX_AGENT_NAME`.
 
 Examples:
 ```bash
 cortextos bus add-cron $CTX_AGENT_NAME heartbeat 6h Read HEARTBEAT.md and follow its instructions.
 cortextos bus add-cron $CTX_AGENT_NAME nightly-metrics "0 1 * * *" Read .claude/skills/system-diagnostics/SKILL.md and run the nightly metrics sweep.
+cortextos bus add-cron $CTX_AGENT_NAME trend-scan "30 */6 * * *" Read .claude/skills/knowledge-base/SKILL.md and scan for metric trends.
 cortextos bus test-cron-fire $CTX_AGENT_NAME heartbeat   # inject immediately to verify wiring
 ```
 
