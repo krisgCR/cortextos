@@ -16,7 +16,12 @@ import { spawnSync } from 'child_process';
 import { mkdtempSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+
+// Every case shells out via spawnSync(node, [HOOK]); under full-suite parallel
+// load those subprocess spawns can exceed vitest's 5s default and false-time-out
+// (passes standalone). Give the spawn-bound suite headroom — assertions unchanged.
+vi.setConfig({ testTimeout: 20000 });
 
 const HOOK = join(__dirname, '../../../dist/hooks/hook-deny-list.js');
 

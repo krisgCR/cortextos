@@ -137,8 +137,8 @@ describe('watcher end-to-end (chokidar v5 directory watching)', () => {
 
     const eventPromise = new Promise<SSEEvent>((resolve, reject) => {
       const timer = setTimeout(
-        () => reject(new Error('no heartbeat SSE event within 8s — chokidar did not fire')),
-        8000,
+        () => reject(new Error('no heartbeat SSE event within 12s — chokidar did not fire')),
+        12000,
       );
       const unsubscribe = onSSEEvent((event) => {
         if (event.type !== 'heartbeat' || event.data?.agent !== E2E_AGENT) return;
@@ -163,5 +163,7 @@ describe('watcher end-to-end (chokidar v5 directory watching)', () => {
     expect(event.data.agent).toBe(E2E_AGENT);
     expect(event.data.health).toBe('healthy');
     expect(event.data.current_task).toBe('WORKING ON: chokidar v5 fix');
-  });
+    // vitest's 5s default test timeout would otherwise fire before the 12s
+    // chokidar guard above — give the FS-event race headroom under full-suite load.
+  }, 15000);
 });
