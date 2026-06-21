@@ -12,9 +12,10 @@ export {
   acquireLease,
   touchHeartbeat,
   reconcile,
+  allRecords,
   RunLeaseConflictError,
 } from './run-authority.js';
-export type { AgentsJsonEntry, ReconcileReport } from './run-authority.js';
+export type { AgentsJsonEntry, ReconcileReport, RunRecord } from './run-authority.js';
 
 // Runtime adapters
 export {
@@ -28,5 +29,8 @@ export {
 export { codexAppServerAdapter } from './adapters/codex-app-server.js';
 export { codexExecAdapter } from './adapters/codex-exec.js';
 export { hermesAdapter } from './adapters/hermes.js';
-export { workflowObserverAdapter } from './adapters/workflow-observer.js';
-export { claudeDiscoveryAdapter } from './adapters/claude-discovery.js';
+export { workflowObserverAdapter, parseJournalEntry, parseWorkflowJournal, isDegraded } from './adapters/workflow-observer.js';
+export { claudeDiscoveryAdapter, parseAgentsJson as parseDiscoveryAgentsJson, spawnAgentsCli } from './adapters/claude-discovery.js';
+
+// Runtime observer (observe-only reconciler)
+export { observeOnce, startRuntimeObserver } from './runtime-observer.js';

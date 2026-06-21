@@ -13,6 +13,7 @@ import {
   getEventsDir,
   getHeartbeatPath,
 } from './config';
+import type { RuntimeBoundaryRecord } from './types';
 
 // ---------------------------------------------------------------------------
 // Mtime tracking helpers
@@ -266,6 +267,42 @@ export function syncHeartbeat(agent: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Runtime boundary record sync (N3 — state/runtimes/<run_id>.json)
+// ---------------------------------------------------------------------------
+
+export function syncRuntime(filePath: string): boolean {
+  if (!fs.existsSync(filePath)) return false;
+  if (!hasFileChanged(filePath)) return false;
+
+  try {
+    const raw = fs.readFileSync(filePath, 'utf-8');
+    const record = JSON.parse(raw) as RuntimeBoundaryRecord;
+
+    db.prepare(
+      `INSERT OR REPLACE INTO runtimes
+        (run_id, runtime, state, tree, degraded, updated_at, native_id, cwd)
+       VALUES
+        (@run_id, @runtime, @state, @tree, @degraded, @updated_at, @native_id, @cwd)`,
+    ).run({
+      run_id: record.run_id,
+      runtime: record.runtime,
+      state: record.state,
+      tree: JSON.stringify(record.tree ?? []),
+      degraded: record.degraded ? 1 : 0,
+      updated_at: record.updated_at,
+      native_id: record.native_id ?? null,
+      cwd: record.cwd ?? null,
+    });
+
+    markSynced(filePath);
+    return true;
+  } catch (err) {
+    console.error(`[sync] Failed to sync runtime record ${filePath}:`, err);
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Full sync
 // ---------------------------------------------------------------------------
 
@@ -274,10 +311,11 @@ export interface SyncResult {
   approvals: number;
   events: number;
   heartbeats: number;
+  runtimes: number;
 }
 
 export function syncAll(): SyncResult {
-  const results: SyncResult = { tasks: 0, approvals: 0, events: 0, heartbeats: 0 };
+  const results: SyncResult = { tasks: 0, approvals: 0, events: 0, heartbeats: 0, runtimes: 0 };
 
   const orgs = getOrgs();
   for (const org of orgs) {
@@ -322,6 +360,17 @@ export function syncAll(): SyncResult {
     }
   } catch {
     // Best effort
+  }
+
+  // Runtime boundary records (N3 — state/runtimes/*.json)
+  const runtimesDir = path.join(CTX_ROOT, 'state', 'runtimes');
+  if (fs.existsSync(runtimesDir)) {
+    const runtimeFiles = fs
+      .readdirSync(runtimesDir)
+      .filter((f) => f.endsWith('.json'));
+    for (const file of runtimeFiles) {
+      if (syncRuntime(path.join(runtimesDir, file))) results.runtimes++;
+    }
   }
 
   // Cost sync moved to syncCostsLazy() - only runs when Analytics page is visited
@@ -370,6 +419,11 @@ export function syncFile(filePath: string): void {
   ) {
     const { org, agent } = extractOrgAndAgentFromEventPath(filePath);
     if (org && agent) syncEvents(org, agent);
+  } else if (
+    filePath.includes('/state/runtimes/') &&
+    filePath.endsWith('.json')
+  ) {
+    syncRuntime(filePath);
   } else if (
     filePath.includes('/state/') &&
     filePath.endsWith('heartbeat.json')

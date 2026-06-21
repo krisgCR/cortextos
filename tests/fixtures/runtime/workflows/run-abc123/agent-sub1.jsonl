@@ -1,0 +1,2 @@
+{"type":"agent.started","agentId":"sub-agent-1","label":"research subtask"}
+{"type":"agent.stopped","agentId":"sub-agent-1","state":"done"}

@@ -184,10 +184,36 @@ export interface User {
   created_at: string;
 }
 
+// -- Runtime DTOs (duplicated from src/types/index.ts; no cross-workspace import) --
+
+export type CapabilityGrade = 'full' | 'degraded' | 'none';
+
+export interface AgentNode {
+  id: string;
+  label: string;
+  state: 'working' | 'blocked' | 'done' | 'failed' | 'stopped' | 'unknown';
+  children: AgentNode[];
+  degraded: boolean;
+}
+
+export interface RuntimeBoundaryRecord {
+  run_id: string;
+  runtime: 'claude-bg' | 'codex-exec' | 'codex-app-server' | 'hermes' | 'unknown';
+  state: 'working' | 'blocked' | 'done' | 'failed' | 'stopped' | 'unknown';
+  tree: AgentNode[];
+  degraded: boolean;
+  /** ISO-8601 — when this record was last written by the runtime observer. */
+  updated_at: string;
+  /** Native session/agent id from `claude agents --json`, when matched. */
+  native_id?: string;
+  /** Absolute working directory of the run, if known. */
+  cwd?: string;
+}
+
 // -- SSE Types --
 
 export interface SSEEvent {
-  type: 'task' | 'approval' | 'heartbeat' | 'event' | 'sync';
+  type: 'task' | 'approval' | 'heartbeat' | 'event' | 'sync' | 'runtime';
   data: Record<string, unknown>;
   timestamp: string;
 }

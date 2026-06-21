@@ -23,7 +23,7 @@ import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
 // ---------------------------------------------------------------------------
 
 /** Shape stored per-run in the ledger (one JSON file per run_id). */
-interface RunRecord {
+export interface RunRecord {
   run_id: string;
   idempotency_key: string;
   /** claude agents --json id, set on adoption */
@@ -80,7 +80,7 @@ function writeRecord(instanceId: string, record: RunRecord): void {
   atomicWriteSync(runPath(instanceId, record.run_id), JSON.stringify(record, null, 2));
 }
 
-function allRecords(instanceId: string): RunRecord[] {
+export function allRecords(instanceId: string): RunRecord[] {
   const dir = ledgerDir(instanceId);
   if (!fs.existsSync(dir)) return [];
   return fs

@@ -47,6 +47,10 @@ function getWatchPaths(): string[] {
   }
 
   // Flat dirs (not org-scoped)
+  // NOTE: CTX_ROOT/state is watched recursively, which already covers
+  // state/runtimes/*.json written by the runtime observer (N3 producer).
+  // No additional watch path is needed; ensureDir in the producer creates
+  // the state/runtimes/ subdirectory at observer startup.
   candidates.push(path.join(CTX_ROOT, 'state'));
   candidates.push(path.join(CTX_ROOT, 'inbox'));
 
@@ -65,6 +69,7 @@ function isRelevantPath(filePath: string): boolean {
   if (filePath.includes('/approvals/') && filePath.endsWith('.json')) return true;
   if (filePath.includes('/analytics/events/') && filePath.endsWith('.jsonl')) return true;
   if (filePath.includes('/inbox/') && filePath.endsWith('.json')) return true;
+  if (filePath.includes('/state/runtimes/') && filePath.endsWith('.json')) return true;
   return false;
 }
 
@@ -77,6 +82,7 @@ function categorizeFilePath(filePath: string): SSEEvent['type'] {
   if (filePath.includes('/approvals/')) return 'approval';
   if (filePath.includes('/heartbeat.json')) return 'heartbeat';
   if (filePath.includes('/analytics/events/')) return 'event';
+  if (filePath.includes('/state/runtimes/')) return 'runtime';
   return 'sync';
 }
 

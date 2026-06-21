@@ -1056,6 +1056,63 @@ export interface RuntimeEvent {
 }
 
 /**
+ * A single node in a reconstructed subagent tree from a workflow journal.
+ *
+ * `degraded` is true when:
+ *   - this node's child agent-*.jsonl file was absent or unreadable, OR
+ *   - the adapter's `observe.descendants` capability is not 'native'
+ *
+ * `children` are the direct subagents spawned by this node.
+ */
+export interface AgentNode {
+  /** Native agent ID from the journal (e.g. "agent-abc-123" or a UUID). */
+  id: string;
+  /** Human-readable label from journal (e.g. the task or prompt first line). */
+  label: string;
+  /** Current lifecycle state of the agent. */
+  state: 'working' | 'blocked' | 'done' | 'failed' | 'stopped' | 'unknown';
+  /** Direct child agents spawned by this node. */
+  children: AgentNode[];
+  /** True when this node or a descendant has partial/missing observation fidelity. */
+  degraded: boolean;
+}
+
+/**
+ * On-disk boundary record written by the producer (runtime-observer) for each
+ * top-level run correlated through the run-authority ledger.
+ *
+ * Path: CTX_ROOT/state/runtimes/<run_id>.json
+ *
+ * The dashboard reads this file and renders it in the Fleet/Runtimes view.
+ * This type is duplicated (not imported) in dashboard/src/lib/types.ts.
+ */
+export interface RuntimeBoundaryRecord {
+  /** Matches the run-authority ledger run_id. */
+  run_id: string;
+  /** Which runtime adapter produced this record. */
+  runtime: Runtime;
+  /** Current top-level state of the run (derived from latest discovery snapshot). */
+  state: 'working' | 'blocked' | 'done' | 'failed' | 'stopped' | 'unknown';
+  /** Reconstructed subagent tree (may be empty if no journal was found). */
+  tree: AgentNode[];
+  /**
+   * True when any node in the tree is degraded, or when the journal could not
+   * be read / observation quality is below 'native'. Set on the whole record
+   * so the dashboard can show a badge without walking the tree.
+   */
+  degraded: boolean;
+  /** ISO-8601 timestamp of when this record was last written by the observer. */
+  updated_at: string;
+  /**
+   * Native session/agent correlation key from `claude agents --json`.
+   * Absent when the run has not yet been matched to a native session.
+   */
+  native_id?: string;
+  /** Absolute working directory of the run, if known from the discovery snapshot. */
+  cwd?: string;
+}
+
+/**
  * Uniform adapter interface every runtime driver must implement.
  * The daemon calls these methods; adapters translate to platform-specific APIs.
  */

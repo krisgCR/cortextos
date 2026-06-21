@@ -149,6 +149,23 @@ function initializeSchema(db: Database.Database): void {
       reset_at INTEGER NOT NULL
     );
 
+    -- Runtime boundary records (N3 dashboard federation)
+    -- Shape mirrors src/types/index.ts RuntimeBoundaryRecord (no cross-workspace import).
+    CREATE TABLE IF NOT EXISTS runtimes (
+      run_id TEXT PRIMARY KEY,
+      runtime TEXT NOT NULL,
+      state TEXT NOT NULL,
+      tree TEXT NOT NULL,
+      degraded INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL,
+      native_id TEXT,
+      cwd TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_runtimes_state ON runtimes(state);
+    CREATE INDEX IF NOT EXISTS idx_runtimes_runtime ON runtimes(runtime);
+    CREATE INDEX IF NOT EXISTS idx_runtimes_updated_at ON runtimes(updated_at);
+
     -- Indexes for common queries
     CREATE INDEX IF NOT EXISTS idx_tasks_org ON tasks(org);
     CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
@@ -213,6 +230,7 @@ export function getTableCounts(): Record<string, number> {
     'users',
     'messages',
     'sync_meta',
+    'runtimes',
   ];
   const counts: Record<string, number> = {};
   for (const table of tables) {
