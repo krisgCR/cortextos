@@ -630,7 +630,33 @@ export type IPCCommandType =
   | 'add-cron'
   | 'update-cron'
   | 'remove-cron'
-  | 'fleet-health';
+  | 'fleet-health'
+  /** N4 / D25: cancel all live runs for a team (durable halt + best-effort stop). */
+  | 'cancel-team'
+  /** N4 / B.1: non-billing read of dispatch gate state (kill-switch + caps). */
+  | 'dispatch-status'
+  /** N4: runtime toggle of the dispatch kill-switch without a daemon restart. */
+  | 'set-dispatch-enabled';
+
+// ---------------------------------------------------------------------------
+// dispatch-status response shape — N4 / B.1
+// ---------------------------------------------------------------------------
+
+/**
+ * Non-billing read of the dispatch gate state.
+ * Returned by the 'dispatch-status' IPC command.
+ * No dispatch is performed — pure env/constant read.
+ */
+export interface DispatchStatusPayload {
+  /** True when CTX_N4_DISPATCH_ENABLED is not 'false' (default: enabled). */
+  enabled: boolean;
+  /** Team token budget ceiling from CTX_TEAM_BUDGET_TOKENS (default: 1_000_000). */
+  teamBudgetTokens: number;
+  /** Per-team concurrency cap hard-coded in the dispatcher. */
+  maxConcurrency: number;
+  /** Global fleet concurrency cap from CTX_FLEET_MAX_CONCURRENT (default: 50). */
+  fleetMaxConcurrent: number;
+}
 
 // ---------------------------------------------------------------------------
 // Execution log pagination response — Subtask 4.3
@@ -812,7 +838,9 @@ export type Runtime =
   | 'codex-exec'
   | 'hermes'
   | 'workflow-observer'
-  | 'claude-discovery';
+  | 'claude-discovery'
+  /** PTY-based worker lane (cortextOS-managed node-pty session). N4 dispatcher lane. */
+  | 'pty';
 
 /**
  * How well a runtime supports a particular capability.
@@ -969,6 +997,12 @@ export interface RunSpec {
   run_id: string;
   /** run_id of the parent run that spawned this one, if any. */
   parent_run_id?: string;
+  /**
+   * Team identifier for grouping runs under a shared budget + concurrency
+   * envelope. Primary team grouping (N4 D25). When absent, the run is
+   * treated as a single-run team for budget accounting purposes.
+   */
+  team_id?: string;
   /** Runtime adapter that will execute this run. */
   runtime: Runtime;
   /** Model identifier to use (e.g. "claude-opus-4-5", "gpt-4o"). */
@@ -987,17 +1021,21 @@ export interface RunSpec {
   verification_contract?: string;
   /**
    * Billing pool this run draws from.
-   * Required so N4 can enforce cross-pool budget limits.
+   * N4 enforcement is live: token budget + concurrency are enforced at dispatch
+   * time by RuntimeDispatcher via run-authority. USD budget is NOT enforced in N4.
    */
   billing_pool: BillingPool;
   /**
    * Maximum tokens this run may consume (input + output).
-   * Required so N4 can enforce cross-pool budget limits.
+   * N4 enforcement is live: RuntimeDispatcher reserves this against the team's
+   * teamBudgetTokens before any session is created. Refused if the reserve would
+   * push the team's budget_reserved sum over the team ceiling. USD is NOT in scope.
    */
   budget_tokens?: number;
   /**
    * Maximum USD cost this run may incur.
-   * Required so N4 can enforce cross-pool budget limits.
+   * NOT enforced in N4 (dropped from N4 core). Reserved for future USD-budget
+   * enforcement in a later phase. Present for schema completeness only.
    */
   budget_cost_usd?: number;
 }
@@ -1137,4 +1175,14 @@ export interface RuntimeDriver {
    * or Codex event) into a RuntimeEvent.
    */
   parseHookEvent(raw: unknown): RuntimeEvent;
+  /**
+   * Terminate a live run by its run_id (e.g. via `claude stop <native_id>`).
+   * Best-effort: resolves when the stop signal has been sent (not necessarily
+   * when the run has exited). Callers should poll getStatus() or rely on
+   * reconcile() to confirm termination.
+   *
+   * N4 enforcement: wired at the D25 dispatch boundary. The capability grade
+   * for this method is declared in `capabilities.control.terminateRun`.
+   */
+  terminateRun(run_id: string): Promise<void>;
 }

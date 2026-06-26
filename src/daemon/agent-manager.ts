@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync, existsSync, mkdirSync, writeFileSync, unlinkSync } from 'fs';
 import { join, relative } from 'path';
-import type { AgentConfig, AgentStatus, CtxEnv, BusPaths, WorkerStatus, TelegramMessage } from '../types/index.js';
+import type { AgentConfig, AgentStatus, CtxEnv, BusPaths, WorkerStatus, TelegramMessage, RuntimeDriver, RuntimeEvent, RunSpec, RunStatus } from '../types/index.js';
 import { AgentProcess } from './agent-process.js';
 import { WorkerProcess } from './worker-process.js';
 import { FastChecker } from './fast-checker.js';
@@ -21,7 +21,13 @@ import {
 } from '../routing/index.js';
 import { RuntimeCircuitBreaker } from '../routing/circuit-breaker.js';
 import type { Bandit, ComplexityBucket, Platform, Role, Tier } from '../routing/index.js';
+import { RuntimeDispatcher } from '../runtime/dispatcher.js';
+import { ClaudeBgAdapter } from '../runtime/adapters/claude-bg.js';
+import { makeCapabilities } from '../runtime/capabilities.js';
 const ROUTING_TIER_ORDER: Tier[] = ['haiku', 'sonnet', 'opus'];
+
+/** Default team budget for IPC-dispatched runs (overridable via CTX_TEAM_BUDGET_TOKENS). */
+const DEFAULT_TEAM_BUDGET_TOKENS = parseInt(process.env['CTX_TEAM_BUDGET_TOKENS'] ?? '1000000', 10);
 
 type LogFn = (msg: string) => void;
 
@@ -54,6 +60,35 @@ export class AgentManager {
   private _routingBandit: Bandit | null = null;
   private _routingBreaker: RuntimeCircuitBreaker | null = null;
 
+  // ── N4 dispatch boundary ──
+  /**
+   * The single guarded boundary for all daemon-managed sessions (D25 / N4).
+   * All worker spawns MUST go through this dispatcher — no direct PTY spawn
+   * path exists outside of it. `_spawnWorkerLane` is private and only called
+   * by the PTY RuntimeDriver registered in the dispatcher's lanes map.
+   */
+  readonly dispatcher: RuntimeDispatcher;
+
+  /**
+   * Sidecar prompt store for PTY lane dispatch.
+   *
+   * `RunSpec` does not carry a `prompt` field (it's a spec, not a task body).
+   * The IPC handler / spawnWorker deposits the prompt here keyed by run_id before
+   * calling `dispatcher.dispatch()`. The PTY RuntimeDriver reads and removes it.
+   * Only lives for the duration of a single dispatch call.
+   */
+  private readonly _pendingPrompts: Map<string, string> = new Map();
+
+  /**
+   * Sidecar optional-params store for PTY lane dispatch.
+   *
+   * Carries the optional `parent`, `model`, `runtime`, `role` args that
+   * callers of `spawnWorker()` may or may not supply. Keyed by run_id.
+   * Consumed on the first `_spawnWorkerLane` call and then deleted.
+   * Preserves 'undefined' semantics for the P2a routing layer.
+   */
+  private readonly _ptyLaneOpts: Map<string, { parent?: string; model?: string; runtime?: string; role?: string }> = new Map();
+
   constructor(instanceId: string, ctxRoot: string, frameworkRoot: string, org: string) {
     this.instanceId = instanceId;
     this.ctxRoot = ctxRoot;
@@ -63,6 +98,88 @@ export class AgentManager {
     if (this.daemonJustCrashed) {
       console.log('[agent-manager] Detected .daemon-crashed marker(s) — previous daemon exited abnormally. Will quiet BUG-011 alarm for this startup cycle.');
     }
+
+    // Build the PTY RuntimeDriver — a thin wrapper that delegates to the private
+    // _spawnWorkerLane method. This is the ONLY entry point for PTY spawning;
+    // making it a lane inside the dispatcher enforces the D25 funnel invariant.
+    const ptyDriver = this._buildPtyDriver();
+
+    // Build the dispatcher with both lanes wired.
+    // The 'claude-bg' adapter uses this instanceId for ledger correlation.
+    const lanes = new Map<string, RuntimeDriver>([
+      ['claude-bg', new ClaudeBgAdapter(instanceId)],
+      ['pty', ptyDriver],
+    ]);
+    this.dispatcher = new RuntimeDispatcher(instanceId, lanes);
+  }
+
+  /**
+   * Build a RuntimeDriver that wraps the PTY spawn path.
+   *
+   * This driver is registered in the dispatcher's 'pty' lane. It is the ONLY
+   * caller of `_spawnWorkerLane` — enforcing AC4 structurally.
+   *
+   * `dispatch(spec)` reads the prompt from `_pendingPrompts` (deposited by the
+   * IPC handler before calling dispatcher.dispatch) and delegates to
+   * `_spawnWorkerLane`. The prompt map entry is consumed on first read.
+   */
+  private _buildPtyDriver(): RuntimeDriver {
+    // Stub capabilities for the PTY lane — control.terminateRun is native (worker.terminate()).
+    const ptyCaps = makeCapabilities({
+      observe: { process: 'degraded', turn: 'none', tool: 'none', descendants: 'none', cost: 'none' },
+      control: { submitTurn: 'none', steerActiveTurn: 'none', interruptTurn: 'none', terminateRun: 'native', drain: 'none' },
+    });
+
+    const self = this;
+
+    const ptyDriver: RuntimeDriver = {
+      runtime: 'pty' as const,
+      capabilities: ptyCaps,
+
+      async dispatch(spec: RunSpec): Promise<void> {
+        const prompt = self._pendingPrompts.get(spec.run_id);
+        self._pendingPrompts.delete(spec.run_id);
+        if (!prompt) {
+          throw new Error(`PtyDriver.dispatch: no pending prompt for run_id=${spec.run_id}`);
+        }
+        // Recover optional spawn parameters deposited by the public spawnWorker()
+        // caller. These preserve 'undefined' semantics so the routing layer inside
+        // _spawnWorkerLane can make its own decisions when not explicitly provided.
+        const opts = self._ptyLaneOpts.get(spec.run_id);
+        self._ptyLaneOpts.delete(spec.run_id);
+        await self._spawnWorkerLane(
+          spec.run_id,
+          spec.cwd,
+          prompt,
+          opts?.parent,
+          opts?.model,
+          opts?.runtime,
+          opts?.role,
+        );
+      },
+
+      async terminateRun(run_id: string): Promise<void> {
+        await self.terminateWorker(run_id);
+      },
+
+      async getStatus(_run_id: string): Promise<RunStatus | null> {
+        return null;
+      },
+
+      async listRuns(): Promise<RunStatus[]> {
+        return [];
+      },
+
+      parseAgentsJson(_raw: unknown): RunStatus {
+        throw new Error('PtyDriver.parseAgentsJson: not implemented');
+      },
+
+      parseHookEvent(_raw: unknown): RuntimeEvent {
+        throw new Error('PtyDriver.parseHookEvent: not implemented');
+      },
+    };
+
+    return ptyDriver;
   }
 
   /**
@@ -1037,7 +1154,88 @@ export class AgentManager {
     return { runtime: platform, model, tier, platform, bucket, decisionId, calibrated, reason };
   }
 
+  /**
+   * Deposit a prompt for a PTY-lane run before calling dispatcher.dispatch().
+   *
+   * The PTY RuntimeDriver reads this prompt during its dispatch() call.
+   * The map entry is consumed (deleted) immediately after the driver reads it,
+   * so entries do not accumulate even if dispatch fails mid-flight.
+   *
+   * Only relevant for the 'pty' lane — claude-bg lane ignores this map.
+   */
+  depositPromptForRun(runId: string, prompt: string): void {
+    this._pendingPrompts.set(runId, prompt);
+  }
+
+  /**
+   * Remove a deposited prompt for a run that was refused by the dispatcher.
+   * Called by the IPC spawn-worker handler when dispatch returns !accepted.
+   */
+  cleanupPendingRun(runId: string): void {
+    this._pendingPrompts.delete(runId);
+  }
+
+  /**
+   * Spawn a PTY worker — public entry point that routes through the dispatcher.
+   *
+   * All callers (IPC handler, tests, CLI) use this method. It deposits the prompt
+   * and caller-supplied options for the PTY lane driver, builds a RunSpec, and
+   * calls dispatcher.dispatch().
+   * The dispatch guard (budget + concurrency + cancel-gen) runs before any PTY
+   * session is created (AC4 enforcement).
+   *
+   * Backward-compatible with the pre-N4 signature: model, runtime, role, and
+   * parent are optional. When not supplied, the PTY driver passes undefined to
+   * `_spawnWorkerLane` so the P2a routing layer can make its own decisions.
+   * When the dispatcher refuses (e.g. at-cap), the error is logged but not thrown.
+   */
   async spawnWorker(name: string, dir: string, prompt: string, parent?: string, model?: string, runtime?: string, role?: string): Promise<void> {
+    const runId = name; // worker name is the run_id for backward-compat
+
+    // Store the caller-supplied optional fields so the PTY driver can pass them
+    // through to _spawnWorkerLane. The RunSpec itself only carries what it needs;
+    // these extras live in the prompt sidecar store's companion map.
+    const spec: RunSpec = {
+      run_id: runId,
+      // 'pty' is the lane identifier — not the runtime the WorkerProcess will use.
+      // The WorkerProcess runtime is resolved inside _spawnWorkerLane by the routing
+      // layer and/or the explicitly passed `runtime` arg.
+      runtime: 'pty',
+      // model in RunSpec is required by the interface but the PTY driver uses the
+      // separately-stored model (via _ptyLaneOpts) to preserve 'undefined' semantics
+      // for the routing layer. Set a safe default here for the interface compliance.
+      model: model ?? 'claude-opus-4-5',
+      cwd: dir,
+      idempotency_key: `${runId}-${Date.now()}`,
+      billing_pool: 'subscription',
+    };
+
+    // Stash the optional spawn parameters so the PTY driver can recover them.
+    // These are consumed on the first _spawnWorkerLane call and then deleted.
+    this._ptyLaneOpts.set(runId, { parent, model, runtime, role });
+    this.depositPromptForRun(runId, prompt);
+
+    const result = await this.dispatcher.dispatch(spec, {
+      teamBudgetTokens: DEFAULT_TEAM_BUDGET_TOKENS,
+      maxConcurrency: 20,
+    });
+    if (!result.accepted) {
+      // Remove deposited prompt and opts if dispatch was refused.
+      this._pendingPrompts.delete(runId);
+      this._ptyLaneOpts.delete(runId);
+      console.warn(`[agent-manager] spawnWorker ${name} refused by dispatcher: ${result.reason}`);
+    }
+  }
+
+  /**
+   * PTY lane spawn — private. Only called by the PtyDriver registered in the
+   * dispatcher. All external callers MUST go through `dispatcher.dispatch()`.
+   *
+   * AC4 enforcement: this method is intentionally private so no production
+   * path can create a daemon-managed session without first obtaining a
+   * team budget reservation + concurrency lease from the dispatcher.
+   */
+  private async _spawnWorkerLane(name: string, dir: string, prompt: string, parent?: string, model?: string, runtime?: string, role?: string): Promise<void> {
     if (this.workers.has(name)) {
       throw new Error(`Worker "${name}" is already running`);
     }

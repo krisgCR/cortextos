@@ -62,6 +62,20 @@ export interface CronExecutionLogPage {
   hasMore: boolean;
 }
 
+export interface SpawnWorkerData {
+  name: string;
+  dir: string;
+  prompt: string;
+  model?: string;
+  runtime?: 'pty' | 'claude-bg';
+  team_id?: string;
+  budget_tokens?: number;
+}
+
+export interface CancelTeamData {
+  team_id: string;
+}
+
 export interface IPCRequest {
   type:
     | 'status'
@@ -78,9 +92,12 @@ export interface IPCRequest {
     | 'add-cron'
     | 'update-cron'
     | 'remove-cron'
-    | 'fleet-health';
+    | 'fleet-health'
+    | 'spawn-worker'
+    | 'cancel-team'
+    | 'dispatch-status';
   agent?: string;
-  data?: Record<string, unknown>;
+  data?: Record<string, unknown> | SpawnWorkerData | CancelTeamData;
 }
 
 export interface IPCResponse {

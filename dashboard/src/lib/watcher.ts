@@ -70,6 +70,8 @@ function isRelevantPath(filePath: string): boolean {
   if (filePath.includes('/analytics/events/') && filePath.endsWith('.jsonl')) return true;
   if (filePath.includes('/inbox/') && filePath.endsWith('.json')) return true;
   if (filePath.includes('/state/runtimes/') && filePath.endsWith('.json')) return true;
+  if (filePath.includes('/state/runs/') && filePath.endsWith('.json')) return true;
+  if (filePath.includes('/state/teams/') && filePath.endsWith('.json')) return true;
   return false;
 }
 
@@ -83,6 +85,8 @@ function categorizeFilePath(filePath: string): SSEEvent['type'] {
   if (filePath.includes('/heartbeat.json')) return 'heartbeat';
   if (filePath.includes('/analytics/events/')) return 'event';
   if (filePath.includes('/state/runtimes/')) return 'runtime';
+  if (filePath.includes('/state/runs/')) return 'run';
+  if (filePath.includes('/state/teams/')) return 'team';
   return 'sync';
 }
 
@@ -133,6 +137,34 @@ export function handleFileChange(
     } catch {
       // Non-fatal: emit with filePath/changeType only — grid will stay stale until next reload.
     }
+  }
+
+  // Enrich runtime, run, and team events with the parsed record.
+  // Torn-read defense: retry once after 50ms on ENOENT or parse failure.
+  // On persistent failure, emit base event (filePath + changeType) — never poison the SSE stream.
+  if (
+    (eventType === 'runtime' || eventType === 'run' || eventType === 'team') &&
+    changeType !== 'remove'
+  ) {
+    const tryRead = (): Record<string, unknown> | null => {
+      try {
+        const raw = readFileSync(filePath, 'utf-8');
+        return JSON.parse(raw) as Record<string, unknown>;
+      } catch {
+        return null;
+      }
+    };
+    let parsed = tryRead();
+    if (parsed === null) {
+      // Torn-read: wait 50ms and retry once
+      const deadline = Date.now() + 50;
+      while (Date.now() < deadline) { /* busy-wait */ }
+      parsed = tryRead();
+    }
+    if (parsed !== null) {
+      Object.assign(data, parsed);
+    }
+    // If still null: emit base event only — non-fatal
   }
 
   const sseEvent: SSEEvent = {

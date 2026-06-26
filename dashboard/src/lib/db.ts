@@ -77,9 +77,52 @@ function reconcileRuntimesSchema(db: Database.Database): void {
   }
 }
 
+// Runs table drift-reconcile: mirrors reconcileRuntimesSchema for the N4 runs cache.
+// Safe to drop — data is rebuilt from state/runs/*.json by syncAll().
+function reconcileRunsSchema(db: Database.Database): void {
+  const cols = (db.pragma('table_info(runs)') as { name: string }[]).map(
+    (c) => c.name,
+  );
+  if (cols.length === 0) return; // table doesn't exist yet — CREATE handles it
+  const expected = [
+    'run_id',
+    'team_id',
+    'state',
+    'lane',
+    'native_id',
+    'budget_reserved',
+    'budget_spent_estimate',
+    'cancel_generation',
+    'epoch',
+    'heartbeat',
+    'updated_at',
+  ];
+  const matches =
+    cols.length === expected.length && expected.every((c) => cols.includes(c));
+  if (!matches) {
+    db.exec('DROP TABLE IF EXISTS runs;');
+  }
+}
+
+// Teams table drift-reconcile.
+function reconcileTeamsSchema(db: Database.Database): void {
+  const cols = (db.pragma('table_info(teams)') as { name: string }[]).map(
+    (c) => c.name,
+  );
+  if (cols.length === 0) return;
+  const expected = ['team_id', 'cancel_generation', 'last_cancel_at', 'updated_at'];
+  const matches =
+    cols.length === expected.length && expected.every((c) => cols.includes(c));
+  if (!matches) {
+    db.exec('DROP TABLE IF EXISTS teams;');
+  }
+}
+
 function initializeSchema(db: Database.Database): void {
   // Reconcile drifted cache-table schemas before the idempotent CREATEs below.
   reconcileRuntimesSchema(db);
+  reconcileRunsSchema(db);
+  reconcileTeamsSchema(db);
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS tasks (
@@ -200,6 +243,32 @@ function initializeSchema(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_runtimes_runtime ON runtimes(runtime);
     CREATE INDEX IF NOT EXISTS idx_runtimes_updated_at ON runtimes(updated_at);
 
+    -- N4 dispatch run ledger (state/runs/<run_id>.json cache)
+    CREATE TABLE IF NOT EXISTS runs (
+      run_id TEXT PRIMARY KEY,
+      team_id TEXT,
+      state TEXT,
+      lane TEXT,
+      native_id TEXT,
+      budget_reserved INTEGER,
+      budget_spent_estimate INTEGER,
+      cancel_generation INTEGER,
+      epoch INTEGER,
+      heartbeat TEXT,
+      updated_at TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_runs_team_id ON runs(team_id);
+    CREATE INDEX IF NOT EXISTS idx_runs_updated_at ON runs(updated_at);
+
+    -- N4 team cancel-generation ledger (state/teams/<team_id>.json cache)
+    CREATE TABLE IF NOT EXISTS teams (
+      team_id TEXT PRIMARY KEY,
+      cancel_generation INTEGER NOT NULL DEFAULT 0,
+      last_cancel_at TEXT,
+      updated_at TEXT
+    );
+
     -- Indexes for common queries
     CREATE INDEX IF NOT EXISTS idx_tasks_org ON tasks(org);
     CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
@@ -265,6 +334,8 @@ export function getTableCounts(): Record<string, number> {
     'messages',
     'sync_meta',
     'runtimes',
+    'runs',
+    'teams',
   ];
   const counts: Record<string, number> = {};
   for (const table of tables) {

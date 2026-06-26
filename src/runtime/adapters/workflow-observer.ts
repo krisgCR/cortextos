@@ -274,4 +274,8 @@ export const workflowObserverAdapter: RuntimeDriver = {
   parseHookEvent(_raw: unknown): RuntimeEvent {
     notImplemented('parseHookEvent');
   },
+
+  terminateRun(_run_id: string): Promise<void> {
+    notImplemented('terminateRun');
+  },
 };

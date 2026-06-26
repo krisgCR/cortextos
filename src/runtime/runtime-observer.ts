@@ -220,15 +220,18 @@ export async function observeOnce(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 function mapLedgerState(
-  ledgerState: 'pending' | 'live' | 'done' | 'orphaned',
+  ledgerState: 'pending' | 'live' | 'done' | 'orphaned' | 'dispatching' | 'failed',
 ): RuntimeBoundaryRecord['state'] {
   switch (ledgerState) {
     case 'pending':
+    case 'dispatching':
       return 'working';
     case 'live':
       return 'working';
     case 'done':
       return 'done';
+    case 'failed':
+      return 'failed';
     case 'orphaned':
       return 'stopped';
     default:

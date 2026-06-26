@@ -22,6 +22,7 @@ import {
   IconX,
   IconNotes,
   IconNetwork,
+  IconBolt,
 } from '@tabler/icons-react';
 import { cn } from '@/lib/utils';
 
@@ -39,6 +40,7 @@ const morePages = [
   { label: 'Knowledge Base', href: '/knowledge-base', icon: IconBook2 },
   { label: 'Wiki', href: '/wiki', icon: IconNotes },
   { label: 'Runtimes', href: '/runtimes', icon: IconNetwork },
+  { label: 'Dispatches', href: '/dispatches', icon: IconBolt },
   { label: 'Workflows', href: '/workflows', icon: IconClock },
   { label: 'Strategy', href: '/strategy', icon: IconTarget },
   { label: 'Experiments', href: '/experiments', icon: IconFlask },

@@ -303,6 +303,79 @@ export function syncRuntime(filePath: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// N4 dispatch run ledger sync (state/runs/<run_id>.json)
+// ---------------------------------------------------------------------------
+
+export function syncRun(filePath: string): boolean {
+  if (!fs.existsSync(filePath)) return false;
+  if (!hasFileChanged(filePath)) return false;
+
+  try {
+    const raw = fs.readFileSync(filePath, 'utf-8');
+    const record = JSON.parse(raw);
+
+    db.prepare(
+      `INSERT OR REPLACE INTO runs
+        (run_id, team_id, state, lane, native_id, budget_reserved,
+         budget_spent_estimate, cancel_generation, epoch, heartbeat, updated_at)
+       VALUES
+        (@run_id, @team_id, @state, @lane, @native_id, @budget_reserved,
+         @budget_spent_estimate, @cancel_generation, @epoch, @heartbeat, @updated_at)`,
+    ).run({
+      run_id: record.run_id,
+      team_id: record.team_id ?? null,
+      state: record.state ?? null,
+      lane: record.lane ?? null,
+      native_id: record.native_id ?? null,
+      budget_reserved: record.budget_reserved ?? null,
+      budget_spent_estimate: record.budget_spent_estimate ?? null,
+      cancel_generation: record.cancel_generation ?? null,
+      epoch: record.epoch ?? null,
+      heartbeat: record.heartbeat ?? null,
+      updated_at: new Date().toISOString(),
+    });
+
+    markSynced(filePath);
+    return true;
+  } catch (err) {
+    console.error(`[sync] Failed to sync run record ${filePath}:`, err);
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// N4 team cancel-generation ledger sync (state/teams/<team_id>.json)
+// ---------------------------------------------------------------------------
+
+export function syncTeam(filePath: string): boolean {
+  if (!fs.existsSync(filePath)) return false;
+  if (!hasFileChanged(filePath)) return false;
+
+  try {
+    const raw = fs.readFileSync(filePath, 'utf-8');
+    const record = JSON.parse(raw);
+
+    db.prepare(
+      `INSERT OR REPLACE INTO teams
+        (team_id, cancel_generation, last_cancel_at, updated_at)
+       VALUES
+        (@team_id, @cancel_generation, @last_cancel_at, @updated_at)`,
+    ).run({
+      team_id: record.team_id,
+      cancel_generation: record.cancel_generation ?? 0,
+      last_cancel_at: record.last_cancel_at ?? null,
+      updated_at: new Date().toISOString(),
+    });
+
+    markSynced(filePath);
+    return true;
+  } catch (err) {
+    console.error(`[sync] Failed to sync team record ${filePath}:`, err);
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Full sync
 // ---------------------------------------------------------------------------
 
@@ -312,10 +385,12 @@ export interface SyncResult {
   events: number;
   heartbeats: number;
   runtimes: number;
+  runs: number;
+  teams: number;
 }
 
 export function syncAll(): SyncResult {
-  const results: SyncResult = { tasks: 0, approvals: 0, events: 0, heartbeats: 0, runtimes: 0 };
+  const results: SyncResult = { tasks: 0, approvals: 0, events: 0, heartbeats: 0, runtimes: 0, runs: 0, teams: 0 };
 
   const orgs = getOrgs();
   for (const org of orgs) {
@@ -373,6 +448,28 @@ export function syncAll(): SyncResult {
     }
   }
 
+  // N4 dispatch run ledger (state/runs/*.json)
+  const runsDir = path.join(CTX_ROOT, 'state', 'runs');
+  if (fs.existsSync(runsDir)) {
+    const runFiles = fs
+      .readdirSync(runsDir)
+      .filter((f) => f.endsWith('.json'));
+    for (const file of runFiles) {
+      if (syncRun(path.join(runsDir, file))) results.runs++;
+    }
+  }
+
+  // N4 team cancel-generation ledger (state/teams/*.json)
+  const teamsDir = path.join(CTX_ROOT, 'state', 'teams');
+  if (fs.existsSync(teamsDir)) {
+    const teamFiles = fs
+      .readdirSync(teamsDir)
+      .filter((f) => f.endsWith('.json'));
+    for (const file of teamFiles) {
+      if (syncTeam(path.join(teamsDir, file))) results.teams++;
+    }
+  }
+
   // Cost sync moved to syncCostsLazy() - only runs when Analytics page is visited
 
   console.log(`[sync] Full sync complete:`, results);
@@ -424,6 +521,16 @@ export function syncFile(filePath: string): void {
     filePath.endsWith('.json')
   ) {
     syncRuntime(filePath);
+  } else if (
+    filePath.includes('/state/runs/') &&
+    filePath.endsWith('.json')
+  ) {
+    syncRun(filePath);
+  } else if (
+    filePath.includes('/state/teams/') &&
+    filePath.endsWith('.json')
+  ) {
+    syncTeam(filePath);
   } else if (
     filePath.includes('/state/') &&
     filePath.endsWith('heartbeat.json')

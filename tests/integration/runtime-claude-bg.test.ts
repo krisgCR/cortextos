@@ -170,7 +170,10 @@ describe('parseHookEvent', () => {
 // ---------------------------------------------------------------------------
 
 describe('claudeBgAdapter.dispatch', () => {
-  it('always throws (gated-closed, N4 not yet live)', async () => {
+  it('attempts real CLI spawn (N4 live) — throws on CLI absence, NOT gated-closed', async () => {
+    // N4 Phase 3: dispatch is now live. The adapter calls `claude --bg` for real.
+    // In CI (or any env without the claude CLI), we expect a spawn error (ENOENT),
+    // not the old "gated-closed" refusal. This verifies the gate was lifted.
     const spec: RunSpec = {
       run_id: 'test-run-1',
       runtime: 'claude-bg',
@@ -180,6 +183,48 @@ describe('claudeBgAdapter.dispatch', () => {
       billing_pool: 'subscription',
     };
 
-    await expect(claudeBgAdapter.dispatch(spec)).rejects.toThrow(/gated-closed/);
+    // The dispatch will try to spawn the claude CLI. In CI without the CLI,
+    // this throws ENOENT. In an env WITH the CLI, it would dispatch a real session
+    // (gated further by CTX_N4_DISPATCH_ENABLED and the dispatcher's budget guard).
+    // What must NOT happen is a "gated-closed" refusal.
+    await expect(claudeBgAdapter.dispatch(spec)).rejects.not.toThrow(/gated-closed/);
+    // And the actual error should be a CLI spawn error, not a logic gate.
+    await expect(claudeBgAdapter.dispatch(spec)).rejects.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// _extractNativeId — real `claude --bg` launch-confirmation format
+// ---------------------------------------------------------------------------
+
+describe('claudeBgAdapter native_id extraction', () => {
+  // Access the private extractor for focused regression coverage.
+  const extract = (out: string): string | null =>
+    (claudeBgAdapter as unknown as { _extractNativeId(s: string, r: string): string | null })._extractNativeId(out, 'run-x');
+
+  it('parses the real --bg launch confirmation (verified against the installed CLI)', () => {
+    // Captured verbatim from `claude --bg --output-format json -p "..."`:
+    // the CLI ignores --output-format json for --bg and emits this text instead.
+    const realOutput = [
+      'backgrounded · c8c52703',
+      '  claude agents             list sessions',
+      '  claude attach c8c52703    open in this terminal',
+      '  claude logs c8c52703      show recent output',
+      '  claude stop c8c52703      stop this',
+    ].join('\n');
+    expect(extract(realOutput)).toBe('c8c52703');
+  });
+
+  it('still parses JSON form when the CLI emits it (forward-compat)', () => {
+    expect(extract('{"session_id":"abc123def"}')).toBe('abc123def');
+  });
+
+  it('still parses a full-UUID form', () => {
+    expect(extract('session started c8c52703-6f2e-4c2a-a0b2-1a89df46f639 ok'))
+      .toBe('c8c52703-6f2e-4c2a-a0b2-1a89df46f639');
+  });
+
+  it('returns null on unrecognized output (degrades to orphan-and-reconcile)', () => {
+    expect(extract('some unrelated text with no id')).toBeNull();
   });
 });

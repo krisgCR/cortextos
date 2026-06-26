@@ -1,7 +1,8 @@
 import { createServer, Server, Socket } from 'net';
 import { existsSync, unlinkSync, chmodSync, readFileSync } from 'fs';
 import { join, resolve as pathResolve } from 'path';
-import type { IPCRequest, IPCResponse, CronSummaryRow, CronDefinition } from '../types/index.js';
+import { randomUUID } from 'crypto';
+import type { IPCRequest, IPCResponse, CronSummaryRow, CronDefinition, DispatchStatusPayload } from '../types/index.js';
 import { AgentManager } from './agent-manager.js';
 import { getIpcPath } from '../utils/paths.js';
 import { readCrons, getExecutionLog, getExecutionLogPage, addCron, updateCron, removeCron, getCronByName } from '../bus/crons.js';
@@ -567,7 +568,7 @@ export class IPCServer {
   /**
    * Handle an incoming IPC request.
    */
-  private handleRequest(request: IPCRequest, socket: Socket): void {
+  private async handleRequest(request: IPCRequest, socket: Socket): Promise<void> {
     // BUG-015: log every incoming IPC request with its source so we can
     // trace which CLI command triggered which daemon action. The source
     // field is populated by CLI clients (cortextos enable / disable / stop
@@ -663,7 +664,7 @@ export class IPCServer {
           break;
 
         case 'spawn-worker': {
-          const d = request.data as { name?: string; dir?: string; prompt?: string; parent?: string; model?: string; runtime?: string; role?: string } | undefined;
+          const d = request.data as { name?: string; dir?: string; prompt?: string; parent?: string; model?: string; runtime?: string; role?: string; team_id?: string; budget_tokens?: number } | undefined;
           if (!d?.name || !d?.dir || !d?.prompt) {
             response = { success: false, error: 'spawn-worker requires: name, dir, prompt' };
           } else if (!WORKER_NAME_REGEX.test(d.name) || d.name.length > 64) {
@@ -677,9 +678,41 @@ export class IPCServer {
             if (!underCtxRoot && !underCwd) {
               response = { success: false, error: 'Invalid worker dir' };
             } else {
-              this.agentManager.spawnWorker(d.name, resolvedDir, d.prompt, d.parent, d.model, d.runtime, d.role)
-                .catch(err => console.error(`[ipc] spawn-worker failed:`, err));
-              response = { success: true, data: `Spawning worker ${d.name}` };
+              // Build a RunSpec and route through the RuntimeDispatcher (D25 / N4 / AC4).
+              // The 'pty' lane reads the prompt from the sidecar map before spawning.
+              const runId = d.name; // use worker name as run_id for backward-compat
+              const spec = {
+                run_id: runId,
+                runtime: (d.runtime ?? 'pty') as import('../types/index.js').Runtime,
+                model: d.model ?? 'claude-opus-4-5',
+                cwd: resolvedDir,
+                idempotency_key: randomUUID(),
+                billing_pool: 'subscription' as const,
+                ...(d.team_id ? { team_id: d.team_id } : {}),
+                ...(d.budget_tokens !== undefined ? { budget_tokens: d.budget_tokens } : {}),
+              };
+              const teamBudgetTokens = parseInt(process.env['CTX_TEAM_BUDGET_TOKENS'] ?? '1000000', 10);
+              // Deposit prompt before reserve so the PTY driver can retrieve it.
+              this.agentManager.depositPromptForRun(runId, d.prompt);
+              // reserve() is fast (no adapter spawn) — await it to get accept/refuse BEFORE responding.
+              const reserveResult = await this.agentManager.dispatcher.reserve(spec, { teamBudgetTokens, maxConcurrency: 20 });
+              if (!reserveResult.accepted) {
+                // Guard refused — clean up the deposited prompt and return the reason fast.
+                console.warn(`[ipc] spawn-worker ${d.name} refused by dispatcher: ${reserveResult.reason}`);
+                this.agentManager.cleanupPendingRun(runId);
+                response = { success: true, data: reserveResult };
+              } else {
+                // Accepted — fire-and-forget the slow adapter spawn (billed, takes seconds).
+                const capturedGeneration = reserveResult._capturedGeneration ?? 0;
+                void this.agentManager.dispatcher.launch(spec, { teamBudgetTokens, maxConcurrency: 20 }, runId, capturedGeneration)
+                  .catch(err => {
+                    console.error(`[ipc] spawn-worker launch failed:`, err);
+                    this.agentManager.cleanupPendingRun(runId);
+                  });
+                // Strip the internal _capturedGeneration before sending over IPC.
+                const { _capturedGeneration: _drop, ...cleanReserveResult } = reserveResult;
+                response = { success: true, data: cleanReserveResult };
+              }
             }
           }
           break;
@@ -700,6 +733,20 @@ export class IPCServer {
         case 'list-workers':
           response = { success: true, data: this.agentManager.listWorkers() };
           break;
+
+        case 'cancel-team': {
+          const teamId = request.data?.team_id as string | undefined;
+          if (!teamId) {
+            response = { success: false, error: 'cancel-team requires: data.team_id' };
+          } else {
+            // cancelTeam: durable halt (bumps cancel_generation) then best-effort
+            // terminate of all live sessions for the team. Resolves after the sweep.
+            this.agentManager.dispatcher.cancelTeam(teamId)
+              .catch(err => console.error(`[ipc] cancel-team failed:`, err));
+            response = { success: true, data: `Cancelling team ${teamId}` };
+          }
+          break;
+        }
 
         case 'inject-worker': {
           const injectName = request.data?.name as string | undefined;
@@ -848,6 +895,34 @@ export class IPCServer {
           } else {
             response = { success: false, error: result.error ?? 'remove-cron failed', data: result };
           }
+          break;
+        }
+
+        case 'dispatch-status': {
+          // Non-billing read of dispatch gate state — no dispatch, no side effects.
+          const dispatchStatus: DispatchStatusPayload = {
+            enabled: process.env['CTX_N4_DISPATCH_ENABLED'] !== 'false',
+            teamBudgetTokens: parseInt(process.env['CTX_TEAM_BUDGET_TOKENS'] ?? '1000000', 10),
+            maxConcurrency: 20,
+            fleetMaxConcurrent: parseInt(process.env['CTX_FLEET_MAX_CONCURRENT'] ?? '50', 10),
+          };
+          response = { success: true, data: dispatchStatus };
+          break;
+        }
+
+        case 'set-dispatch-enabled': {
+          // Runtime toggle of the N4 dispatch kill-switch. dispatcher.reserve()
+          // and the dispatch-status read both consult process.env live on every
+          // call, so mutating it here takes effect immediately for new
+          // dispatches — no daemon restart. The change is in-memory only: a
+          // daemon restart resets to the launch-time CTX_N4_DISPATCH_ENABLED.
+          const enabled = request.data?.['enabled'];
+          if (typeof enabled !== 'boolean') {
+            response = { success: false, error: 'set-dispatch-enabled requires data.enabled (boolean)' };
+            break;
+          }
+          process.env['CTX_N4_DISPATCH_ENABLED'] = enabled ? 'true' : 'false';
+          response = { success: true, data: { enabled } };
           break;
         }
 

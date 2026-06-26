@@ -213,9 +213,34 @@ export interface RuntimeBoundaryRecord {
 // -- SSE Types --
 
 export interface SSEEvent {
-  type: 'task' | 'approval' | 'heartbeat' | 'event' | 'sync' | 'runtime';
+  type: 'task' | 'approval' | 'heartbeat' | 'event' | 'sync' | 'runtime' | 'run' | 'team';
   data: Record<string, unknown>;
   timestamp: string;
+}
+
+// -- N4 Dispatch / Run Ledger Types --
+
+/** SQLite row shape for state/runs/<run_id>.json records. */
+export interface RunRow {
+  run_id: string;
+  team_id: string | null;
+  state: string | null;
+  lane: string | null;
+  native_id: string | null;
+  budget_reserved: number | null;
+  budget_spent_estimate: number | null;
+  cancel_generation: number | null;
+  epoch: number | null;
+  heartbeat: string | null;
+  updated_at: string | null;
+}
+
+/** SQLite row shape for state/teams/<team_id>.json records. */
+export interface TeamRow {
+  team_id: string;
+  cancel_generation: number;
+  last_cancel_at: string | null;
+  updated_at: string | null;
 }
 
 // -- Task Filters --
