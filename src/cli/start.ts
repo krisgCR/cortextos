@@ -19,8 +19,9 @@ export const startCommand = new Command('start')
   .argument('[agent]', 'Specific agent to start (starts all if omitted)')
   .option('--instance <id>', 'Instance ID', 'default')
   .option('--foreground', 'Run daemon in foreground (no PM2, for debugging)')
+  .option('--allow-api-key', 'Permit starting the daemon with ANTHROPIC_API_KEY set (forces metered billing)')
   .description('Start the cortextOS daemon and agents')
-  .action(async (agent: string | undefined, options: { instance: string; foreground?: boolean }) => {
+  .action(async (agent: string | undefined, options: { instance: string; foreground?: boolean; allowApiKey?: boolean }) => {
     const ipc = new IPCClient(options.instance);
     const daemonRunning = await ipc.isDaemonRunning();
 
@@ -30,6 +31,26 @@ export const startCommand = new Command('start')
 
       if (!existsSync(daemonScript)) {
         console.error('Daemon not built. Run: npm run build');
+        process.exit(1);
+      }
+
+      // Billing guard: the daemon inherits this process's env (daemonEnv below).
+      // A present ANTHROPIC_API_KEY silently switches the whole fleet from
+      // subscription (OAuth) billing to metered API billing. Fail closed —
+      // refuse to start unless the operator explicitly opts in with
+      // --allow-api-key. See the fleet-billing-subscription-first invariant.
+      if (process.env.ANTHROPIC_API_KEY && !options.allowApiKey) {
+        console.error('');
+        console.error('  ⚠️  ANTHROPIC_API_KEY is set in this environment.');
+        console.error('     Starting the daemon now would bill the fleet at METERED API rates');
+        console.error('     instead of your Claude subscription.');
+        console.error('');
+        console.error('  To start on your subscription (recommended):');
+        console.error('     unset ANTHROPIC_API_KEY && cortextos start');
+        console.error('');
+        console.error('  To start anyway with metered billing:');
+        console.error('     cortextos start --allow-api-key');
+        console.error('');
         process.exit(1);
       }
 
@@ -194,16 +215,22 @@ export const startCommand = new Command('start')
         console.error(`  Error: ${response.error}`);
       }
     } else {
+      // Daemon is already running and no agent was named. `start` does not
+      // auto-spawn every enabled agent here (each spawn is billed) — it reports
+      // current state so the operator can start a specific agent deliberately.
       const response = await ipc.send({ type: 'status', source: 'cortextos start' });
       if (response.success) {
         const statuses = response.data as any[];
         if (statuses.length === 0) {
-          console.log('No agents configured. Add one with: cortextos add-agent <name>');
+          console.log('Daemon is already running. No agents configured.');
+          console.log('Add one with:   cortextos add-agent <name>');
         } else {
-          console.log('Agent statuses:');
+          console.log('Daemon is already running. Current agents:');
           for (const s of statuses) {
             console.log(`  ${s.name}: ${s.status} (pid: ${s.pid || '-'})`);
           }
+          console.log('');
+          console.log('Start a specific agent with:  cortextos start <agent>');
         }
       }
     }
