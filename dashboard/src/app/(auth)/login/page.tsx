@@ -102,43 +102,61 @@ export default function LoginPage() {
     body.set('password', passwordInput?.value || '');
 
     try {
+      // Ask Auth.js to return the post-sign-in target as JSON instead of issuing
+      // a 302. The X-Auth-Return-Redirect header makes the credentials callback
+      // respond 200 { url } — the same transport next-auth/react's signIn() uses.
+      //
+      // Why not just follow the 302: Auth.js derives its base URL from the
+      // request host as http://localhost:<port>/, but the browser origin is
+      // http://127.0.0.1:<port> (or a Tailscale host). `redirect: 'follow'` then
+      // chases a CROSS-ORIGIN redirect that the browser CORS-blocks
+      // (net::ERR_FAILED → "Failed to fetch"), even though the session cookie was
+      // already set — i.e. login succeeded but the user saw "Network error".
       const res = await fetch(form.action, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'X-Auth-Return-Redirect': '1',
+        },
         body: body.toString(),
         credentials: 'same-origin',
-        redirect: 'follow',
       });
-      if (res.redirected) {
-        const target = new URL(res.url);
-        if (target.pathname.startsWith('/login')) {
-          const code = target.searchParams.get('error') || 'Unknown';
-          // CallbackRouteError usually means the rate limiter blocked the request.
-          // Show a human-readable message instead of the raw error code.
-          const msg = code === 'CallbackRouteError'
-            ? 'Too many attempts. Please wait a few minutes and try again.'
-            : `Sign-in failed: ${code}`;
-          setError(msg);
-          setLoading(false);
-          return;
-        }
-        // Navigate to the original destination the user tried to reach, or /
-        // if none was recorded. Use window.location.origin to build a safe
-        // relative-only target — res.url can be http://localhost:3000/ behind
-        // a reverse proxy (when AUTH_URL is not set), which would send the
-        // browser to the wrong host.
-        const callbackParam = new URL(window.location.href).searchParams.get('callbackUrl');
-        // Validate same-origin: must start with / but not // (which is a protocol-relative URL)
-        const safeTarget = callbackParam && callbackParam.startsWith('/') && !callbackParam.startsWith('//') ? callbackParam : '/';
-        window.location.href = safeTarget;
+
+      if (!res.ok) {
+        setError(`Sign-in failed with status ${res.status}`);
+        setLoading(false);
         return;
       }
-      if (res.ok) {
-        window.location.href = '/';
+
+      // On both success and auth failure Auth.js returns 200 { url }. A failure
+      // url carries ?error=<code> (e.g. CredentialsSignin); success does not.
+      const data = (await res.json().catch(() => null)) as { url?: string } | null;
+      const returnedError = data?.url
+        ? new URL(data.url, window.location.origin).searchParams.get('error')
+        : null;
+
+      if (returnedError) {
+        // CallbackRouteError usually means the rate limiter blocked the request;
+        // CredentialsSignin means the username/password was rejected. Map both to
+        // human-readable copy instead of the raw error code.
+        const msg = returnedError === 'CallbackRouteError'
+          ? 'Too many attempts. Please wait a few minutes and try again.'
+          : returnedError === 'CredentialsSignin'
+            ? 'Invalid username or password.'
+            : `Sign-in failed: ${returnedError}`;
+        setError(msg);
+        setLoading(false);
         return;
       }
-      setError(`Sign-in failed with status ${res.status}`);
-      setLoading(false);
+
+      // Success. Navigate to the original destination the user tried to reach, or
+      // / if none was recorded. Build a relative-only same-origin target — never
+      // navigate to data.url, which can be http://localhost:<port>/ (the wrong
+      // host behind a proxy or loopback alias).
+      const callbackParam = new URL(window.location.href).searchParams.get('callbackUrl');
+      // Validate same-origin: must start with / but not // (which is a protocol-relative URL)
+      const safeTarget = callbackParam && callbackParam.startsWith('/') && !callbackParam.startsWith('//') ? callbackParam : '/';
+      window.location.href = safeTarget;
     } catch (err) {
       console.error('[login] submit error:', err);
       setError('Network error. Please try again.');
