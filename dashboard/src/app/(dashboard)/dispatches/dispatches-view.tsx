@@ -7,6 +7,8 @@
 import { useEffect, useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
+import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip';
+import { IconAlertTriangle } from '@tabler/icons-react';
 import { RunStateBadge } from '@/components/shared/run-state-badge';
 import { TeamCancelBadge } from '@/components/shared/team-cancel-badge';
 import { DispatchDialog } from '@/components/dispatch/dispatch-dialog';
@@ -23,6 +25,50 @@ function formatTokens(n: number | null | undefined): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
   return String(n);
+}
+
+// ---- Kill-switch surfacing ----
+
+const KILL_SWITCH_TOOLTIP =
+  'Dispatch is paused (kill-switch on). Run `cortextos dispatch resume` to re-enable.';
+
+// Inline page-level banner explaining the paused kill-switch. The DispatchDialog
+// carries the same message, but the only control that opens it is disabled while
+// paused — so this is the only on-page explanation the user can actually reach.
+function KillSwitchBanner() {
+  return (
+    <div className="flex items-center gap-2 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+      <IconAlertTriangle className="h-4 w-4 shrink-0" />
+      <span>
+        Dispatch is paused (kill-switch on) — new dispatches are refused. Re-enable with{' '}
+        <code className="font-mono text-xs">cortextos dispatch resume</code>. Cancelling
+        existing runs is still allowed.
+      </span>
+    </div>
+  );
+}
+
+// Wraps a (possibly disabled) trigger so hovering it explains why it is disabled.
+// A disabled <button> swallows pointer events, so the trigger is wrapped in a span
+// (matching the project's existing disabled-tooltip pattern in test-fire-button.tsx).
+function DisabledReasonTooltip({
+  show,
+  reason,
+  children,
+}: {
+  show: boolean;
+  reason: string;
+  children: React.ReactNode;
+}) {
+  if (!show) return <>{children}</>;
+  return (
+    <Tooltip>
+      <TooltipTrigger render={<span className="inline-flex">{children}</span>} />
+      <TooltipContent>
+        <p>{reason}</p>
+      </TooltipContent>
+    </Tooltip>
+  );
 }
 
 // ---- RunCard ----
@@ -200,6 +246,11 @@ export function DispatchesView({ initialRuns, initialTeams, initialRollups, disp
   // Re-derive rollups whenever runs or teams change
   const rollups = computeRollups(runs, teams);
 
+  // Kill-switch: dispatch globally disabled (daemon-authoritative, refreshed on
+  // page reload since the page is force-dynamic). Blocks NEW dispatches only —
+  // cancelling existing runs stays allowed.
+  const killSwitchOff = dispatchStatus?.enabled === false;
+
   const { isConnected } = useSSE({
     filter: (e: SSEEvent) => e.type === 'run' || e.type === 'team',
     onEvent: (event: SSEEvent) => {
@@ -250,25 +301,30 @@ export function DispatchesView({ initialRuns, initialTeams, initialRollups, disp
 
   if (runs.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center rounded-lg border border-dashed py-16 text-center">
-        <p className="text-sm font-medium text-muted-foreground">No dispatch runs yet.</p>
-        <p className="mt-1 text-xs text-muted-foreground">
-          Dispatched runs will appear here as they are created.
-        </p>
-        <span
-          className={`mt-4 inline-block h-2 w-2 rounded-full ${
-            isConnected ? 'bg-emerald-500 animate-pulse' : 'bg-yellow-500'
-          }`}
-          title={isConnected ? 'Listening for updates' : 'Reconnecting…'}
-        />
-        <Button
-          className="mt-4"
-          size="sm"
-          onClick={() => setDispatchDialogOpen(true)}
-          disabled={dispatchStatus?.enabled === false}
-        >
-          Dispatch run
-        </Button>
+      <div className="space-y-4">
+        {killSwitchOff && <KillSwitchBanner />}
+        <div className="flex flex-col items-center justify-center rounded-lg border border-dashed py-16 text-center">
+          <p className="text-sm font-medium text-muted-foreground">No dispatch runs yet.</p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Dispatched runs will appear here as they are created.
+          </p>
+          <span
+            className={`mt-4 inline-block h-2 w-2 rounded-full ${
+              isConnected ? 'bg-emerald-500 animate-pulse' : 'bg-yellow-500'
+            }`}
+            title={isConnected ? 'Listening for updates' : 'Reconnecting…'}
+          />
+          <DisabledReasonTooltip show={killSwitchOff} reason={KILL_SWITCH_TOOLTIP}>
+            <Button
+              className="mt-4"
+              size="sm"
+              onClick={() => setDispatchDialogOpen(true)}
+              disabled={killSwitchOff}
+            >
+              Dispatch run
+            </Button>
+          </DisabledReasonTooltip>
+        </div>
         <DispatchDialog
           open={dispatchDialogOpen}
           onOpenChange={setDispatchDialogOpen}
@@ -284,6 +340,8 @@ export function DispatchesView({ initialRuns, initialTeams, initialRollups, disp
 
   return (
     <div className="space-y-4">
+      {killSwitchOff && <KillSwitchBanner />}
+
       <div className="flex items-center gap-2 text-xs text-muted-foreground">
         <span
           className={`h-2 w-2 rounded-full ${
@@ -295,15 +353,17 @@ export function DispatchesView({ initialRuns, initialTeams, initialRollups, disp
         <span className="ml-auto">
           {totalLive} live · {runs.length} total run{runs.length !== 1 ? 's' : ''}
         </span>
-        <Button
-          size="sm"
-          variant="outline"
-          className="h-6 px-2 text-xs"
-          onClick={() => setDispatchDialogOpen(true)}
-          disabled={dispatchStatus?.enabled === false}
-        >
-          + Dispatch run
-        </Button>
+        <DisabledReasonTooltip show={killSwitchOff} reason={KILL_SWITCH_TOOLTIP}>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-6 px-2 text-xs"
+            onClick={() => setDispatchDialogOpen(true)}
+            disabled={killSwitchOff}
+          >
+            + Dispatch run
+          </Button>
+        </DisabledReasonTooltip>
       </div>
 
       {rollups.map((rollup) => (
