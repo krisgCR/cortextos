@@ -4,10 +4,17 @@ node_modules/
 pnpm-lock.yaml
 pnpm-workspace.yaml
 yarn.lock
-.claude/
+.claude/*
 !.claude/commands/
 !.claude/commands/**
 !.claude/orchestration-cortextos-node/
+# E2E gate harness — auto-firing two-layer test gate; travels with the fork.
+# (`.claude/*` not `.claude/` so these file/subdir re-includes take effect.)
+!.claude/settings.json
+!.claude/hooks/
+!.claude/hooks/**
+!.claude/skills/
+!.claude/skills/**
 # Include template .claude dirs (needed for agent settings.json)
 !templates/**/.claude/
 !templates/**/.claude/**

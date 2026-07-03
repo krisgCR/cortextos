@@ -96,3 +96,23 @@ CLI. Never bind `0.0.0.0` or serve plain HTTP; phone reachability is via `tailsc
 1. `npm run build` — TypeScript compiles cleanly.
 2. `npm test` — all tests pass.
 3. Add unit tests in `tests/` for new code; match existing patterns in `src/`.
+
+## E2E Gate (auto-firing — `npm test` is not enough)
+
+🔴 **Non-trivial changes to `src/`, `dashboard/src/`, `bus/`, `templates/`, configs, or
+lockfiles require a live two-layer E2E pass before commit/push** — daemon (CLI/IPC + ledger)
+*and* dashboard UI (SSE, dispatch, kill-switch) driven in a real browser. `npm test` stays
+green even when real UX is broken; this gate catches what it misses.
+
+- **Enforcement is automatic** (no opt-in): the project `.claude/settings.json` PreToolUse
+  hooks block `git commit` / `git push` of a non-trivial change unless a fresh, tree-bound
+  pass-sentinel exists. The sentinel is emitted ONLY by the deterministic suite, so it cannot
+  be faked.
+- **To produce a pass:** `npm run build && npm run test:e2e-gate` — boots an isolated,
+  **zero-bill** instance (`e2e-gate`: all agents disabled, `CTX_E2E_FAKE_RUNTIME=1`, no API
+  key, process-spawn audit), asserts the checklist, always tears down, and writes the sentinel
+  on green. Or invoke the **`e2e-fleet` skill** to drive it + explore the UI for bugs.
+- **Audited bypass for a genuinely trivial change:** `CTX_E2E_SKIP="reason" git commit …`
+  (logged to `.planning/verify/skips.log`).
+- **Real billed dispatch is OFF by default** — only with explicit approval +
+  `CTX_E2E_REAL_CLAUDE=1`. Never spawn real Claude/Codex sessions in a gate/skill run.

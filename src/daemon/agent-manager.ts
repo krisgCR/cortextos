@@ -23,6 +23,7 @@ import { RuntimeCircuitBreaker } from '../routing/circuit-breaker.js';
 import type { Bandit, ComplexityBucket, Platform, Role, Tier } from '../routing/index.js';
 import { RuntimeDispatcher } from '../runtime/dispatcher.js';
 import { ClaudeBgAdapter } from '../runtime/adapters/claude-bg.js';
+import { FakeAdapter } from '../runtime/adapters/fake.js';
 import { makeCapabilities } from '../runtime/capabilities.js';
 const ROUTING_TIER_ORDER: Tier[] = ['haiku', 'sonnet', 'opus'];
 
@@ -106,10 +107,22 @@ export class AgentManager {
 
     // Build the dispatcher with both lanes wired.
     // The 'claude-bg' adapter uses this instanceId for ledger correlation.
+    //
+    // E2E zero-bill mode (CTX_E2E_FAKE_RUNTIME=1): swap BOTH billed lanes for the
+    // FakeAdapter so a real dispatch flows through the entire guarded seam
+    // (IPC → reserve → launch → ledger → SSE) without spawning any billed session.
+    // Default-off; no production impact. See src/runtime/adapters/fake.ts.
+    const fakeRuntime = process.env['CTX_E2E_FAKE_RUNTIME'] === '1';
+    const claudeLane: RuntimeDriver = fakeRuntime
+      ? new FakeAdapter()
+      : new ClaudeBgAdapter(instanceId);
     const lanes = new Map<string, RuntimeDriver>([
-      ['claude-bg', new ClaudeBgAdapter(instanceId)],
-      ['pty', ptyDriver],
+      ['claude-bg', claudeLane],
+      ['pty', fakeRuntime ? claudeLane : ptyDriver],
     ]);
+    if (fakeRuntime) {
+      console.log('[agent-manager] CTX_E2E_FAKE_RUNTIME=1 — all dispatch lanes use the zero-bill FakeAdapter (no billed sessions).');
+    }
     this.dispatcher = new RuntimeDispatcher(instanceId, lanes);
   }
 
