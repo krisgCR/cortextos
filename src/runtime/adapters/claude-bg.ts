@@ -339,12 +339,14 @@ export class ClaudeBgAdapter implements RuntimeDriver {
    * @throws on CLI failure — dispatcher rolls back the reservation.
    */
   async dispatch(spec: RunSpec): Promise<void> {
-    // Build argv: --bg plus model, prompt, and working directory
+    // Build argv: --bg plus model and the prompt as the POSITIONAL argument.
+    // `--bg` conflicts with `-p`/`--print` (a printed session never starts the
+    // interactive job `claude agents` attaches to → unattachable) and ignores
+    // `--output-format json`, so the prompt must be positional, not `-p`.
     const argv = [
       '--bg',
       '--model', spec.model ?? 'claude-opus-4-5',
-      '--output-format', 'json',
-      '-p', `[run:${spec.run_id}] ${spec.cwd}`,
+      `[run:${spec.run_id}] ${spec.cwd}`,
     ];
 
     // OAuth-only: strip API key so the CLI uses OAuth / subscription billing.

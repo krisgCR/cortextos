@@ -21,7 +21,7 @@ import { RuntimeDispatcher } from '../../src/runtime/dispatcher.js';
 import { ClaudeBgAdapter } from '../../src/runtime/adapters/claude-bg.js';
 import { allRecords } from '../../src/runtime/run-authority.js';
 import { AgentManager } from '../../src/daemon/agent-manager.js';
-import type { RunSpec } from '../../src/types/index.js';
+import type { RunSpec, RunStatus } from '../../src/types/index.js';
 
 // ---------------------------------------------------------------------------
 // Gated live e2e — requires CTX_E2E_REAL_CLAUDE=1
@@ -31,6 +31,7 @@ describe.skipIf(!process.env['CTX_E2E_REAL_CLAUDE'])('live e2e (CTX_E2E_REAL_CLA
   let tmpDir: string;
   let instanceId: string;
   let dispatcher: RuntimeDispatcher;
+  let adapter: ClaudeBgAdapter;
 
   beforeEach(() => {
     // Isolated temp instance dir so tests don't share ledger state.
@@ -38,8 +39,9 @@ describe.skipIf(!process.env['CTX_E2E_REAL_CLAUDE'])('live e2e (CTX_E2E_REAL_CLA
     instanceId = `e2e-${Date.now()}`;
 
     // Build dispatcher with the real ClaudeBgAdapter wired.
+    adapter = new ClaudeBgAdapter(instanceId);
     const lanes = new Map([
-      ['claude-bg', new ClaudeBgAdapter(instanceId)],
+      ['claude-bg', adapter],
     ]);
     dispatcher = new RuntimeDispatcher(instanceId, lanes);
   });
@@ -152,6 +154,70 @@ describe.skipIf(!process.env['CTX_E2E_REAL_CLAUDE'])('live e2e (CTX_E2E_REAL_CLA
     if (refuseResult.accepted) return; // type narrowing
     expect(refuseResult.reason).toBe('cancel-in-effect');
   }, 30_000);
+
+  it('cancelRun(human) stops the real native session (quota-burn halt)', async () => {
+    // The honest "cancel actually stops billing" check the fake adapter cannot
+    // prove: dispatch a real --bg session, confirm it is LIVE (burning), cancel
+    // via the run-scoped cancelRun primitive, then confirm the native session
+    // reports a non-live state — the proxy for "no longer consuming quota".
+    const runId = `humancancel-run-${Date.now()}`;
+    const teamId = `team-humancancel-${Date.now()}`;
+
+    const spec: RunSpec = {
+      run_id: runId,
+      runtime: 'claude-bg',
+      model: 'claude-opus-4-5',
+      cwd: tmpDir,
+      idempotency_key: `ik-${runId}`,
+      billing_pool: 'subscription',
+      team_id: teamId,
+      budget_tokens: 100_000,
+    };
+
+    const result = await dispatcher.dispatch(spec, {
+      teamBudgetTokens: 500_000,
+      maxConcurrency: 5,
+    });
+    expect(result.accepted, `dispatch refused: ${JSON.stringify(result)}`).toBe(true);
+
+    // Wait for native_id correlation.
+    const nidDeadline = Date.now() + 8_000;
+    let nativeId: string | undefined;
+    while (Date.now() < nidDeadline) {
+      const rec = allRecords(instanceId).find((r) => r.run_id === runId);
+      if (rec?.native_id) { nativeId = rec.native_id; break; }
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    expect(nativeId).toBeTruthy();
+
+    // Prove the session WAS live/burning before cancel (working or blocked).
+    const liveStatus = await adapter.getStatus(runId);
+    expect(liveStatus).not.toBeNull();
+    expect(['working', 'blocked']).toContain(liveStatus?.state);
+
+    // Human-invoked run-scoped cancel (the actual "killable" path).
+    await dispatcher.cancelRun(runId, 'human');
+
+    // Ledger: terminal with reason=human, cancel intent recorded.
+    const cancelled = allRecords(instanceId).find((r) => r.run_id === runId);
+    expect(cancelled?.cancel_reason).toBe('human');
+    expect(cancelled?.cancel_requested_at).toBeTruthy();
+    expect(['done', 'orphaned', 'stopped']).toContain(cancelled?.state);
+
+    // Native session must go non-live within a grace window. `claude stop` is
+    // graceful, so allow a few polls; a session that stays working/blocked here
+    // is the escalation-to-orphan failure this test exists to catch.
+    const stopDeadline = Date.now() + 10_000;
+    let finalState: RunStatus['state'] | 'gone' | undefined;
+    while (Date.now() < stopDeadline) {
+      const st = await adapter.getStatus(runId);
+      if (st === null) { finalState = 'gone'; break; }
+      if (!['working', 'blocked'].includes(st.state)) { finalState = st.state; break; }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    expect(finalState, `native session did not stop (still live) — reason=${finalState}`).toBeTruthy();
+    expect(['stopped', 'done', 'failed', 'gone']).toContain(finalState);
+  }, 45_000);
 
   it('missing native_id degrades to orphan not silent leak', async () => {
     // Dispatch with a throwing terminateRun adapter to simulate missing native_id.
@@ -270,33 +336,22 @@ describe('AC4 — funnel completeness', () => {
     expect(typeof RuntimeDispatcher.prototype.cancelTeam).toBe('function');
   });
 
-  it('ClaudeBgAdapter dispatch no longer throws gated-closed error', async () => {
-    // AC4 corollary: the gate was LIFTED in N4 Phase 3. Any attempt to use the
-    // adapter now either succeeds (claude CLI present) or throws a spawn/CLI error
-    // (CLI absent/fails), but must NOT throw the old "gated-closed" guard refusal.
-    const adapter = new ClaudeBgAdapter('test-ac4');
-    const spec: RunSpec = {
-      run_id: 'ac4-gate-test',
-      runtime: 'claude-bg',
-      model: 'claude-opus-4-5',
-      cwd: tmpdir(),
-      idempotency_key: 'ik-ac4-gate',
-      billing_pool: 'subscription',
-    };
-
-    let caught: unknown = undefined;
+  it('ClaudeBgAdapter dispatch no longer contains the gated-closed guard', () => {
+    // AC4 corollary: the gate was LIFTED in N4 Phase 3 — the adapter must no
+    // longer carry the old "gated-closed" refusal. Asserted STRUCTURALLY against
+    // the source (like the _spawnWorkerLane grep above), NOT by calling real
+    // dispatch — calling dispatch with the CLI present spawns a live, billed
+    // --bg session that the standard suite must never create (zero-bill rule).
+    let grepOutput = '';
     try {
-      await adapter.dispatch(spec);
-      // Dispatch succeeded (real claude CLI present) — gate is definitely lifted.
-    } catch (err) {
-      caught = err;
+      grepOutput = execSync(
+        'grep -rn "gated-closed" src/runtime/adapters/claude-bg.ts',
+        { cwd: '/Users/Kris/cortextos', encoding: 'utf8' },
+      ).trim();
+    } catch {
+      // grep exits 1 when no matches — zero references, which is the pass case.
+      grepOutput = '';
     }
-
-    if (caught !== undefined) {
-      // Dispatch failed — that's ok (CLI absent or error), but must NOT be gated-closed.
-      expect(String(caught)).not.toMatch(/gated-closed/);
-    }
-    // In either case (success or non-gate error), the gate has been lifted.
-    // The test passes as long as it didn't throw "gated-closed".
+    expect(grepOutput).toBe('');
   });
 });
