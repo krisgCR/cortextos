@@ -31,6 +31,7 @@ import { join } from 'path';
 import { homedir } from 'os';
 import { makeCapabilities } from '../capabilities.js';
 import { allRecords } from '../run-authority.js';
+import { spawnAgentsCli } from './claude-discovery.js';
 import { atomicWriteSync, ensureDir } from '../../utils/atomic.js';
 import type {
   BillingPool,
@@ -152,6 +153,10 @@ function mapAgentsState(
       return 'failed';
     case 'stopped':
     case 'cancelled':
+    case 'dormant':
+      // A `claude stop`'d session lingers as a dormant/resumable record in
+      // `claude agents` (MEMORY gotcha) — must map to a non-live state so
+      // getStatus's confirmedDead check treats it as genuinely gone.
       return 'stopped';
     default:
       return 'working';
@@ -409,12 +414,38 @@ export class ClaudeBgAdapter implements RuntimeDriver {
   }
 
   /**
-   * Get the current status of a run by run_id.
+   * Get the current status of a run by run_id (H1).
    *
-   * Stub: real impl via `agents --json` polling is N3+.
+   * Resolves native_id from the ledger, then queries a live `claude agents`
+   * snapshot — reusing claude-discovery's `spawnAgentsCli` rather than
+   * re-implementing CLI parsing — for the entry matching that native_id.
+   *
+   * This is the confirmation source `reissueTermination` (run-authority.ts)
+   * relies on to decide whether a boot-time termination actually took: a
+   * still-live entry maps to a state in LIVE_STATUS_STATES so the escalation
+   * correctly treats it as NOT dead, instead of unconditionally trusting one
+   * `claude stop` attempt. Confirmation relies on `claude agents --json`
+   * reflecting a stopped session as non-live — `mapAgentsState` maps
+   * 'stopped'/'cancelled'/'dormant' to 'stopped', which is not a live state.
+   *
+   * Returns null (genuinely gone / unresolvable) when: no native_id is on
+   * the ledger record, or no matching entry is found in the snapshot.
    */
-  async getStatus(_run_id: string): Promise<RunStatus | null> {
-    return Promise.resolve(null);
+  async getStatus(run_id: string): Promise<RunStatus | null> {
+    const records = allRecords(this.instanceId);
+    const nativeId = records.find((r) => r.run_id === run_id)?.native_id;
+    if (!nativeId) return null;
+
+    const { entries } = await spawnAgentsCli();
+    const entry = entries.find((e) => e.id === nativeId);
+    if (!entry) return null;
+
+    return {
+      run_id,
+      state: mapAgentsState(entry.state),
+      billing_pool: 'subscription',
+      heartbeat: new Date().toISOString(),
+    };
   }
 
   /**

@@ -25,7 +25,7 @@
  * dispatch/getStatus/listRuns/parseHookEvent keep throwing NotImplemented (N4).
  *
  * Graceful degradation: CLI absent / non-zero exit / non-JSON stdout →
- *   returns { entries: [], stdout: '' } — never throws.
+ *   returns { entries: [], stdout: '', ok: false } — never throws.
  */
 
 import { execFile } from 'child_process';
@@ -137,18 +137,27 @@ export function parseAgentsJson(stdout: string): AgentsJsonEntry[] {
  * Spawn `claude agents --json --all` and parse the output.
  *
  * Graceful degradation: CLI absent, non-zero exit, or non-JSON output →
- *   returns { entries: [], stdout: '' } — never throws.
+ *   returns { entries: [], stdout: '', ok: false } — never throws.
+ *
+ * `ok` (H3) distinguishes a genuinely empty/degraded snapshot from a
+ * successful CLI read that legitimately found nothing — callers that use
+ * an empty snapshot to drive destructive decisions (e.g. reconcile's
+ * orphan sweep) must gate on `ok`, not just `entries.length === 0`.
  */
-export async function spawnAgentsCli(): Promise<{ entries: AgentsJsonEntry[]; stdout: string }> {
+export async function spawnAgentsCli(): Promise<{
+  entries: AgentsJsonEntry[];
+  stdout: string;
+  ok: boolean;
+}> {
   try {
     const { stdout } = await execFileAsync('claude', ['agents', '--json', '--all'], {
       timeout: 10_000,
     });
     const entries = parseAgentsJson(stdout);
-    return { entries, stdout };
+    return { entries, stdout, ok: true };
   } catch {
     // CLI absent, non-zero exit, timeout, or any other error.
-    return { entries: [], stdout: '' };
+    return { entries: [], stdout: '', ok: false };
   }
 }
 

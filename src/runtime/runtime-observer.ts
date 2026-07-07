@@ -187,6 +187,16 @@ export async function observeOnce(): Promise<void> {
       state = mapLedgerState(run.state);
     }
 
+    // Task 2.1 — mirror the ledger's cancel state onto the boundary record.
+    // A run mid-cancel (cancel_requested_at set but not yet finalized into a
+    // terminal ledger state) must never surface as 'working' — the dashboard
+    // reads THIS file, not the ledger, so without this override a cancelling
+    // run would show "working" for the entire native-stop window even though
+    // a human/watchdog already decided to stop it.
+    if (run.cancel_requested_at !== undefined && run.state !== 'done' && run.state !== 'failed') {
+      state = 'stopped';
+    }
+
     // Read workflow journal (best-effort).
     const journalResult = findJournalForRun(run.run_id);
     let tree: RuntimeBoundaryRecord['tree'] = [];

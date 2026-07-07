@@ -115,6 +115,7 @@ describe('spawnAgentsCli', () => {
     const spy = vi.spyOn(mod, 'spawnAgentsCli').mockResolvedValueOnce({
       entries: [],
       stdout: '',
+      ok: false,
     });
 
     const result = await mod.spawnAgentsCli();

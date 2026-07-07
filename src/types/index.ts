@@ -648,6 +648,8 @@ export type IPCCommandType =
   | 'fleet-health'
   /** N4 / D25: cancel all live runs for a team (durable halt + best-effort stop). */
   | 'cancel-team'
+  /** Task 3.3: human-invoked cancel of a single run — delegates to cancelRun(id,'human'). */
+  | 'cancel-run'
   /** N4 / B.1: non-billing read of dispatch gate state (kill-switch + caps). */
   | 'dispatch-status'
   /** N4: runtime toggle of the dispatch kill-switch without a daemon restart. */
@@ -970,6 +972,13 @@ export interface CapabilityMetadata {
  * Required on RunSpec and RunStatus so N4 can enforce cross-pool budget limits.
  */
 export type BillingPool = 'subscription' | 'metered' | 'unknown';
+
+/**
+ * Typed reason recorded on a run when it is cancelled through the
+ * run-authority guarded cancel primitive (`requestCancel`/`cancelRun`).
+ * Open to future values (e.g. N4's `'budget'`).
+ */
+export type CancelReason = 'deadline' | 'stall' | 'human';
 
 /**
  * Fencing token — opaque string issued to the current run holder.

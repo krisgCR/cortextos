@@ -15,10 +15,12 @@ import { randomUUID } from 'crypto';
 import * as fs from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
-import type { RunLease } from '../types/index.js';
+import type { CancelReason, RunLease } from '../types/index.js';
 import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
 
 const DEFAULT_FLEET_MAX_CONCURRENT = 50;
+/** Default run deadline (1h) when neither RunSpec.deadline nor CTX_RUN_DEADLINE_MS is set. */
+const DEFAULT_RUN_DEADLINE_MS = 3_600_000;
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -47,6 +49,25 @@ export interface RunRecord {
   budget_spent_estimate?: number;
   /** Team cancel generation at the time this run was reserved (N4 cancel guard) */
   cancel_generation?: number;
+  /**
+   * ISO-8601 wall-clock deadline for this run, persisted AT RESERVE TIME
+   * (from RunSpec.deadline, or now + CTX_RUN_DEADLINE_MS default). Never
+   * derived later — env may change across a daemon restart.
+   */
+  deadline_at?: string;
+  /**
+   * ISO-8601 timestamp of when a cancel was first requested for this run.
+   * Set together with `cancel_reason` by the guarded `requestCancel` CAS;
+   * both fields together act as the run-scoped, transient "cancelling"
+   * signal — `state` is left unchanged until the cancel is finalized (see
+   * `requestCancel`).
+   */
+  cancel_requested_at?: string;
+  /**
+   * Typed reason for cancellation. First-reason-wins: once set, it is never
+   * overwritten by a later cancel request (see `requestCancel`).
+   */
+  cancel_reason?: CancelReason;
 }
 
 /**
@@ -77,6 +98,15 @@ export interface ReconcileReport {
   readopted: string[];
   orphaned: string[];
   completed: string[];
+  /**
+   * Sticky run_ids (Task 2.3) — the ledger record is terminal
+   * (`done`/`failed`/`orphaned`) or has a cancel intent recorded
+   * (`cancel_requested_at` set), but the native supervisor still reports a
+   * live-ish match. These were deliberately NOT re-adopted as live; the
+   * caller (which owns adapter references — see `RuntimeDispatcher.reconcileBoot`)
+   * must re-issue termination via `reissueTermination`.
+   */
+  stickyLive: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -296,16 +326,25 @@ export function touchHeartbeat(
  * For each record in the ledger:
  * - If a matching entry exists in the snapshot and is live-ish → re-adopt (state='live', epoch++, heartbeat now).
  * - If a matching entry exists and is done/stopped → mark completed.
- * - If no matching entry and the run was 'live' → mark orphaned.
+ * - If no matching entry and the run was 'live' → mark orphaned (only when
+ *   `snapshotReliable` — see below).
+ *
+ * @param snapshotReliable  Whether `agentsSnapshot` reflects a genuine,
+ *   successful CLI read (default true). When `false` (e.g. a cold-boot
+ *   `claude agents` timeout degraded to an empty snapshot), the plain-orphan
+ *   branch is skipped entirely — an unreliable/degraded snapshot must never
+ *   mass-orphan every live run (H3); the record is left untouched for a
+ *   later, reliable reconcile pass to handle.
  *
  * Returns a report of which run_ids were readopted, completed, or orphaned.
  */
 export function reconcile(
   instanceId: string,
   agentsSnapshot: AgentsJsonEntry[],
+  snapshotReliable = true,
 ): ReconcileReport {
   const records = allRecords(instanceId);
-  const report: ReconcileReport = { readopted: [], orphaned: [], completed: [] };
+  const report: ReconcileReport = { readopted: [], orphaned: [], completed: [], stickyLive: [] };
 
   const liveStates = new Set(['working', 'running', 'blocked', 'active', 'started']);
   const doneStates = new Set(['done', 'stopped', 'failed', 'completed', 'exited']);
@@ -317,6 +356,47 @@ export function reconcile(
         (record.native_id && e.id === record.native_id) ||
         e.sessionId === record.run_id,
     );
+
+    // Task 2.3 — sticky guard: a terminal or mid-cancel record must NEVER be
+    // re-adopted as live on restart, even if the native supervisor still
+    // reports the session running (e.g. a cancel decided just before a
+    // crash, or an already-terminal run whose native session was never
+    // actually killed). Flag it for re-termination instead.
+    if (record.cancel_requested_at !== undefined || TERMINAL_LEDGER_STATES.has(record.state)) {
+      if (match && liveStates.has(match.state)) {
+        // Capture a freshly-observed native_id so the termination escalation
+        // has something to act on (e.g. the record predates native_id being
+        // written, or a new session id was assigned across a re-adopt).
+        if (match.id && record.native_id !== match.id) {
+          writeRecord(instanceId, { ...record, native_id: match.id });
+        }
+        report.stickyLive.push(record.run_id);
+      } else if (
+        record.cancel_requested_at !== undefined &&
+        !TERMINAL_LEDGER_STATES.has(record.state)
+      ) {
+        // M1: a cancel intent was recorded but the record was never
+        // finalized (e.g. a crash between requestCancel and cancelRun's own
+        // finalize/terminate step) — state is still non-terminal ('live' /
+        // 'dispatching' / 'pending'). No live match in this snapshot means
+        // the native side is absent or already stopped, so there's nothing
+        // left to terminate. Finalize now via the existing releaseDispatch
+        // path so cancel_reason carries through and reserved budget is
+        // freed — otherwise the record stays stuck non-terminal forever
+        // (Task 2.3 acceptance).
+        try {
+          releaseDispatch(instanceId, record.run_id, 'done');
+          report.completed.push(record.run_id);
+        } catch {
+          // Best-effort — ledger I/O failure here is non-fatal; the next
+          // reconcile pass will retry.
+        }
+      }
+      // Otherwise: no match (or a done-ish match) and the record was already
+      // terminal — the sticky record's terminal state already stands, leave
+      // it as is.
+      continue;
+    }
 
     if (match) {
       if (liveStates.has(match.state)) {
@@ -342,6 +422,13 @@ export function reconcile(
       }
       // If the state is something else entirely, leave the record unchanged.
     } else if (record.state === 'live') {
+      if (!snapshotReliable) {
+        // H3: the snapshot itself is unreliable (e.g. a cold-boot discovery
+        // timeout) — do not mass-orphan every live run off a degraded/empty
+        // read. Leave the record untouched; a later reliable reconcile call
+        // will handle it.
+        continue;
+      }
       // Was live but not found in snapshot → orphaned.
       const updated: RunRecord = {
         ...record,
@@ -396,6 +483,8 @@ export function reserveDispatch(
     budget_tokens: number;
     teamBudgetTokens: number;
     maxConcurrency: number;
+    /** ISO-8601 absolute deadline (RunSpec.deadline). Falls back to now + CTX_RUN_DEADLINE_MS. */
+    deadline?: string;
   },
 ): ReserveResult {
   const teamId = opts.team_id ?? `solo:${opts.run_id}`;
@@ -448,21 +537,37 @@ export function reserveDispatch(
   }
 
   // --- 6. Write dispatching record ---
+  const now = new Date();
   const record: RunRecord = {
     run_id: opts.run_id,
     idempotency_key: opts.idempotency_key,
     epoch: 0,
-    heartbeat: new Date().toISOString(),
+    heartbeat: now.toISOString(),
     state: 'dispatching',
     team_id: teamId,
     lane: opts.lane,
     budget_reserved: opts.budget_tokens,
     budget_spent_estimate: 0,
     cancel_generation: teamState.cancel_generation,
+    deadline_at: resolveDeadlineAt(opts.deadline, now),
   };
 
   writeRecord(instanceId, record);
   return { ok: true, record };
+}
+
+/**
+ * Resolve the absolute `deadline_at` to persist at reserve time.
+ *
+ * Uses the explicit RunSpec.deadline if provided; otherwise computes
+ * `now + CTX_RUN_DEADLINE_MS` (default 1h). Read ONCE at reserve time — never
+ * recomputed later, since CTX_RUN_DEADLINE_MS may change across a daemon
+ * restart and a run's deadline must stay fixed once dispatched.
+ */
+function resolveDeadlineAt(explicitDeadline: string | undefined, now: Date): string {
+  if (explicitDeadline) return explicitDeadline;
+  const ms = parseInt(process.env['CTX_RUN_DEADLINE_MS'] ?? String(DEFAULT_RUN_DEADLINE_MS), 10);
+  return new Date(now.getTime() + ms).toISOString();
 }
 
 /**
@@ -556,4 +661,195 @@ export function teamRollup(
   const cancelGeneration = readTeamState(instanceId, teamId).cancel_generation;
 
   return { reserved, spentEstimate, liveCount: liveRecs.length, cancelGeneration };
+}
+
+// ---------------------------------------------------------------------------
+// Run-scoped cancel primitive (Phase 0a / Fragile Assumption #1)
+//
+// This is a RUN-scoped fence, deliberately separate from the TEAM-scoped
+// `cancel_generation` above — reusing cancel_generation for a single run
+// would cancel/refuse dispatch for the whole team. `cancelRun` (dispatcher.ts)
+// and `cancelTeam` both funnel through `requestCancel` so there is exactly
+// one guarded transition primitive; `cancelTeam` bumps the team generation
+// first, then calls `requestCancel` per live run.
+// ---------------------------------------------------------------------------
+
+/** States from which a cancel may be requested. Anything else is already terminal. */
+const CANCELLABLE_STATES = new Set<RunRecord['state']>(['pending', 'dispatching', 'live']);
+
+/**
+ * Terminal ledger states (Task 2.3). A record in one of these states — or
+ * one carrying a `cancel_requested_at` intent — is STICKY for `reconcile`:
+ * it must never be re-adopted as live, regardless of what the native
+ * supervisor snapshot reports.
+ */
+const TERMINAL_LEDGER_STATES = new Set<RunRecord['state']>(['done', 'failed', 'orphaned']);
+
+/** Result of a `requestCancel` call. */
+export interface CancelIntentResult {
+  /** The record after the guarded write attempt (unchanged if `applied` is false). */
+  record: RunRecord;
+  /**
+   * True only for the call that actually won the compare-and-swap and wrote
+   * the cancel intent. Callers use this to decide whether THEY own the
+   * follow-up terminate/finalize step — prevents a concurrent/duplicate
+   * cancel call from also invoking `adapter.terminateRun`.
+   */
+  applied: boolean;
+}
+
+/**
+ * Guarded compare-and-swap: record a cancel intent on a run.
+ *
+ * Only a run currently in a cancellable state (`pending`/`dispatching`/`live`)
+ * with no prior cancel intent may transition; a run that is already terminal
+ * (`done`/`failed`/`orphaned`) or already has a cancel intent recorded is a
+ * no-op that preserves the ORIGINAL `cancel_reason` — first-reason-wins.
+ *
+ * `state` is intentionally left unchanged by this call. `cancel_requested_at`
+ * + `cancel_reason` together are the run-scoped, transient "cancelling"
+ * signal: the run is logically cancelling from the moment this write lands
+ * until a caller finalizes it into a genuine terminal state once native stop
+ * is confirmed (or found unnecessary — e.g. no `native_id` was ever assigned).
+ * Finalization reuses the existing `releaseDispatch` (success) / orphan
+ * (failure) paths rather than duplicating transition logic here.
+ *
+ * Returns `null` if the run is not found in the ledger.
+ */
+export function requestCancel(
+  instanceId: string,
+  runId: string,
+  reason: CancelReason,
+): CancelIntentResult | null {
+  const existing = readRecord(instanceId, runId);
+  if (!existing) return null;
+
+  if (existing.cancel_reason !== undefined || !CANCELLABLE_STATES.has(existing.state)) {
+    // Already terminal, or a cancel intent already won the race — no-op.
+    return { record: existing, applied: false };
+  }
+
+  const updated: RunRecord = {
+    ...existing,
+    cancel_requested_at: new Date().toISOString(),
+    cancel_reason: reason,
+  };
+  writeRecord(instanceId, updated);
+  return { record: updated, applied: true };
+}
+
+// ---------------------------------------------------------------------------
+// Boot-time termination escalation (Task 2.3 / Fragile Assumption #3)
+//
+// Callback-shaped rather than RuntimeDriver-shaped so this module never
+// needs to depend on the adapter type — the caller (RuntimeDispatcher, which
+// already resolves lanes) binds whichever adapter owns the run's lane and
+// hands in plain functions. This keeps run-authority.ts adapter-agnostic
+// while still being the sole owner of the ledger-mutating half of every
+// terminate path (coordination invariant).
+// ---------------------------------------------------------------------------
+
+/** States from a `getStatus`-shaped poll considered "still live" for escalation purposes. */
+const LIVE_STATUS_STATES = new Set(['working', 'blocked', 'running', 'active', 'started']);
+
+export interface TerminateEscalationOpts {
+  /** Best-effort graceful terminate (e.g. `claude stop <native_id>`). */
+  terminateRun: (run_id: string) => Promise<void>;
+  /**
+   * Optional live-status poll used to confirm the graceful stop actually
+   * took. When omitted, a successful (non-throwing) `terminateRun` call is
+   * trusted as sufficient — matches adapters with no status-poll capability.
+   */
+  getStatus?: (run_id: string) => Promise<{ state: string } | null>;
+  /** Ms to wait before each grace-poll check. Default 500. */
+  gracePollMs?: number;
+  /** Number of terminate retries after the first attempt. Default 1 (2 attempts total). */
+  maxRetries?: number;
+}
+
+export interface TerminateEscalationResult {
+  /** True once a poll (or the absence of one) confirms the session is no longer live. */
+  confirmedDead: boolean;
+  /** True when retries were exhausted while the native session still reports live. */
+  escalatedToOrphan: boolean;
+}
+
+/**
+ * Re-issue termination for a run whose ledger record is STICKY (terminal or
+ * mid-cancel — see `reconcile`'s `stickyLive`) but the native supervisor
+ * still reports it live/running.
+ *
+ * Escalation: `terminateRun` (graceful) -> grace-poll native status (if a
+ * `getStatus` fn is supplied) -> retry up to `maxRetries` -> if still live,
+ * mark the ledger `orphaned` (preserving any existing `cancel_reason`) and
+ * surface loudly via `console.error` — claude-bg has no local PID to
+ * hard-kill, so loud orphan-surfacing is the honest MVP (see Known
+ * Limitations in WORK.md).
+ *
+ * On confirmed death: finalizes a mid-cancel record (`cancel_reason` set,
+ * not yet `done`) via the existing `releaseDispatch` path so `cancel_reason`
+ * carries through. A record that was already terminal (e.g. a resurrected
+ * orphan with no cancel intent) is left untouched — its terminal state
+ * already stands; this call only stops the leaked native session.
+ *
+ * This is the sole re-issue path for boot-time reconcile — callers must not
+ * call `adapter.terminateRun` directly for a sticky record outside this
+ * helper.
+ */
+export async function reissueTermination(
+  instanceId: string,
+  runId: string,
+  opts: TerminateEscalationOpts,
+): Promise<TerminateEscalationResult> {
+  const { terminateRun, getStatus, gracePollMs = 500, maxRetries = 1 } = opts;
+
+  let confirmedDead = !getStatus; // no status fn — trust the terminate call itself
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      await terminateRun(runId);
+    } catch {
+      // Best-effort — fall through to the poll/retry below.
+    }
+
+    if (!getStatus) break;
+
+    if (gracePollMs > 0) {
+      await new Promise<void>((resolve) => setTimeout(resolve, gracePollMs));
+    }
+    try {
+      const status = await getStatus(runId);
+      confirmedDead = status === null || !LIVE_STATUS_STATES.has(status.state);
+    } catch {
+      confirmedDead = false;
+    }
+
+    if (confirmedDead) break;
+  }
+
+  const existing = readRecord(instanceId, runId);
+  if (!existing) return { confirmedDead, escalatedToOrphan: false };
+
+  if (confirmedDead) {
+    if (existing.cancel_reason !== undefined && existing.state !== 'done') {
+      try {
+        releaseDispatch(instanceId, runId, 'done');
+      } catch {
+        // Best-effort — ledger I/O failure here is non-fatal.
+      }
+    }
+    return { confirmedDead: true, escalatedToOrphan: false };
+  }
+
+  console.error(
+    `[run-authority] reissueTermination: run ${runId} still reported live after ` +
+      `${maxRetries + 1} terminate attempt(s) — marking orphaned.`,
+  );
+  const updated: RunRecord = {
+    ...existing,
+    state: 'orphaned',
+    budget_reserved: 0,
+    heartbeat: new Date().toISOString(),
+  };
+  writeRecord(instanceId, updated);
+  return { confirmedDead: false, escalatedToOrphan: true };
 }
