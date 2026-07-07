@@ -233,6 +233,12 @@ export interface RunRow {
   epoch: number | null;
   heartbeat: string | null;
   updated_at: string | null;
+  /**
+   * Typed terminal cancel reason ('deadline' | 'stall' | 'human'), sourced from
+   * the RunRecord ledger (state/runs/<run_id>.json) — not derived from JSON
+   * blobs. Null while the run is not cancelled.
+   */
+  cancel_reason: string | null;
 }
 
 /** SQLite row shape for state/teams/<team_id>.json records. */

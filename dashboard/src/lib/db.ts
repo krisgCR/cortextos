@@ -96,6 +96,7 @@ function reconcileRunsSchema(db: Database.Database): void {
     'epoch',
     'heartbeat',
     'updated_at',
+    'cancel_reason',
   ];
   const matches =
     cols.length === expected.length && expected.every((c) => cols.includes(c));
@@ -244,6 +245,9 @@ function initializeSchema(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_runtimes_updated_at ON runtimes(updated_at);
 
     -- N4 dispatch run ledger (state/runs/<run_id>.json cache)
+    -- cancel_reason (Task 3.4): typed terminal cancel reason ('deadline' |
+    -- 'stall' | 'human'), sourced from the RunRecord ledger, NOT derived
+    -- from JSON blobs.
     CREATE TABLE IF NOT EXISTS runs (
       run_id TEXT PRIMARY KEY,
       team_id TEXT,
@@ -255,7 +259,8 @@ function initializeSchema(db: Database.Database): void {
       cancel_generation INTEGER,
       epoch INTEGER,
       heartbeat TEXT,
-      updated_at TEXT
+      updated_at TEXT,
+      cancel_reason TEXT
     );
 
     CREATE INDEX IF NOT EXISTS idx_runs_team_id ON runs(team_id);

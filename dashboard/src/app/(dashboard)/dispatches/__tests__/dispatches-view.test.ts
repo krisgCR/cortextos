@@ -38,6 +38,7 @@ function makeRun(overrides: Partial<RunRow> = {}): RunRow {
     epoch: null,
     heartbeat: null,
     updated_at: new Date().toISOString(),
+    cancel_reason: null,
     ...overrides,
   };
 }

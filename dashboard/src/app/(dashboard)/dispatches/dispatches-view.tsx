@@ -10,11 +10,12 @@ import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip';
 import { IconAlertTriangle } from '@tabler/icons-react';
 import { RunStateBadge } from '@/components/shared/run-state-badge';
+import { RunCancelReasonBadge } from '@/components/shared/run-cancel-reason-badge';
 import { TeamCancelBadge } from '@/components/shared/team-cancel-badge';
 import { DispatchDialog } from '@/components/dispatch/dispatch-dialog';
 import type { DispatchStatus } from '@/components/dispatch/dispatch-dialog';
 import { useSSE } from '@/hooks/use-sse';
-import { computeRollups } from '@/lib/data/dispatch-rollup';
+import { computeRollups, LIVE_RUN_STATES } from '@/lib/data/dispatch-rollup';
 import type { TeamRollup } from '@/lib/data/dispatch-rollup';
 import type { RunRow, TeamRow, SSEEvent } from '@/lib/types';
 
@@ -71,6 +72,56 @@ function DisabledReasonTooltip({
   );
 }
 
+// ---- StopRunButton (Task 3.3 — human cancel path) ----
+
+interface StopRunButtonProps {
+  runId: string;
+}
+
+function StopRunButton({ runId }: StopRunButtonProps) {
+  const [status, setStatus] = useState<'idle' | 'loading' | 'done' | 'error'>('idle');
+  const [errorMsg, setErrorMsg] = useState('');
+
+  async function handleStop() {
+    setStatus('loading');
+    try {
+      const res = await fetch(`/api/runs/${encodeURIComponent(runId)}/cancel`, {
+        method: 'POST',
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.error ?? `Stop failed (${res.status})`);
+      }
+      setStatus('done');
+      // SSE ('run' events) will reflect the terminal state + cancel_reason
+      // as the daemon processes the cancellation.
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Unknown error');
+      setStatus('error');
+    }
+  }
+
+  if (status === 'done') {
+    return <span className="text-xs text-muted-foreground italic shrink-0">Stop requested</span>;
+  }
+
+  if (status === 'error') {
+    return <span className="text-xs text-destructive shrink-0">{errorMsg}</span>;
+  }
+
+  return (
+    <Button
+      size="sm"
+      variant="outline"
+      className="h-6 px-2 text-xs shrink-0"
+      onClick={handleStop}
+      disabled={status === 'loading'}
+    >
+      {status === 'loading' ? 'Stopping…' : 'Stop run'}
+    </Button>
+  );
+}
+
 // ---- RunCard ----
 
 interface RunCardProps {
@@ -78,6 +129,8 @@ interface RunCardProps {
 }
 
 function RunCard({ run }: RunCardProps) {
+  const isLive = (LIVE_RUN_STATES as readonly string[]).includes(run.state ?? '');
+
   return (
     <div className="flex items-center gap-3 py-1.5 text-sm border-b last:border-b-0">
       <span className="font-mono text-xs text-muted-foreground truncate min-w-0 flex-1">
@@ -87,6 +140,8 @@ function RunCard({ run }: RunCardProps) {
         <span className="text-xs text-muted-foreground shrink-0">{run.lane}</span>
       )}
       <RunStateBadge state={run.state ?? 'unknown'} className="shrink-0" />
+      <RunCancelReasonBadge cancelReason={run.cancel_reason} className="shrink-0" />
+      {isLive && <StopRunButton runId={run.run_id} />}
     </div>
   );
 }

@@ -317,10 +317,12 @@ export function syncRun(filePath: string): boolean {
     db.prepare(
       `INSERT OR REPLACE INTO runs
         (run_id, team_id, state, lane, native_id, budget_reserved,
-         budget_spent_estimate, cancel_generation, epoch, heartbeat, updated_at)
+         budget_spent_estimate, cancel_generation, epoch, heartbeat, updated_at,
+         cancel_reason)
        VALUES
         (@run_id, @team_id, @state, @lane, @native_id, @budget_reserved,
-         @budget_spent_estimate, @cancel_generation, @epoch, @heartbeat, @updated_at)`,
+         @budget_spent_estimate, @cancel_generation, @epoch, @heartbeat, @updated_at,
+         @cancel_reason)`,
     ).run({
       run_id: record.run_id,
       team_id: record.team_id ?? null,
@@ -333,6 +335,9 @@ export function syncRun(filePath: string): boolean {
       epoch: record.epoch ?? null,
       heartbeat: record.heartbeat ?? null,
       updated_at: new Date().toISOString(),
+      // Sourced from the ledger record (state/runs/<run_id>.json), the truth —
+      // not derived from any other JSON blob. Task 3.4.
+      cancel_reason: record.cancel_reason ?? null,
     });
 
     markSynced(filePath);

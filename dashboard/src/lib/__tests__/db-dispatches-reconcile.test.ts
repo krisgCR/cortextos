@@ -58,6 +58,8 @@ describe('runs schema reconcile (db.ts)', () => {
     expect(cols).toContain('team_id');
     expect(cols).toContain('epoch');
     expect(cols).toContain('heartbeat');
+    // Task 3.4: cancel_reason column, sourced from the RunRecord ledger.
+    expect(cols).toContain('cancel_reason');
 
     // Stale columns gone
     expect(cols).not.toContain('old_column_1');
@@ -73,10 +75,12 @@ describe('runs schema reconcile (db.ts)', () => {
         .prepare(
           `INSERT OR REPLACE INTO runs
             (run_id, team_id, state, lane, native_id, budget_reserved,
-             budget_spent_estimate, cancel_generation, epoch, heartbeat, updated_at)
+             budget_spent_estimate, cancel_generation, epoch, heartbeat, updated_at,
+             cancel_reason)
            VALUES
             (@run_id, @team_id, @state, @lane, @native_id, @budget_reserved,
-             @budget_spent_estimate, @cancel_generation, @epoch, @heartbeat, @updated_at)`,
+             @budget_spent_estimate, @cancel_generation, @epoch, @heartbeat, @updated_at,
+             @cancel_reason)`,
         )
         .run({
           run_id: 'n4-smoke-001',
@@ -90,8 +94,19 @@ describe('runs schema reconcile (db.ts)', () => {
           epoch: 1,
           heartbeat: '2026-06-25T10:00:00Z',
           updated_at: '2026-06-25T10:00:00Z',
+          cancel_reason: null,
         }),
     ).not.toThrow();
+
+    // A cancelled run persists its typed reason (round-trip read-back).
+    db.prepare(
+      `INSERT OR REPLACE INTO runs (run_id, state, cancel_reason, updated_at)
+       VALUES ('n4-cancelled-001', 'done', 'human', '2026-06-25T10:05:00Z')`,
+    ).run();
+    const cancelled = db
+      .prepare('SELECT cancel_reason FROM runs WHERE run_id = ?')
+      .get('n4-cancelled-001') as { cancel_reason: string | null };
+    expect(cancelled.cancel_reason).toBe('human');
   });
 });
 

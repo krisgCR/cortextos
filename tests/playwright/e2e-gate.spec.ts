@@ -100,6 +100,7 @@ interface RunRec {
   team_id?: string;
   state: string;
   budget_reserved?: number;
+  cancel_reason?: string;
 }
 
 function ledgerRuns(): RunRec[] {
@@ -176,6 +177,27 @@ test('cancel-team stops the team\'s live runs (IPC → ledger)', async ({ page }
   expect(res.status(), await res.text()).toBe(200);
   const after = await poll(() => liveInTeam(team), (r) => r.length === 0, 10_000);
   expect(after.length).toBe(0);
+});
+
+test('cancel-run (human) stops ONE live run WITH REASON (route → IPC → ledger)', async ({ page }) => {
+  // The headline "killable" capability: a human stops a single run via the exact
+  // route the dashboard "Stop run" button POSTs, and the ledger records reason=human.
+  const team = 'gate-cancel-run-human';
+  await page.request.post(`${base()}/api/dispatch`, { data: { name: 'gate-stop-run', dir: CTX_ROOT, prompt: 'noop', team_id: team, budget_tokens: 100_000 } });
+  const live = await poll(() => liveInTeam(team), (r) => r.length >= 1, 10_000);
+  expect(live.length).toBeGreaterThanOrEqual(1);
+  const runId = live[0]!.run_id;
+  const res = await page.request.post(`${base()}/api/runs/${runId}/cancel`, { data: {} });
+  expect(res.status(), await res.text()).toBe(200);
+  // Contract: the run leaves the live set AND the ledger carries cancel_reason=human.
+  const rec = await poll(
+    () => ledgerRuns().find((r) => r.run_id === runId),
+    (r) => !!r && !LIVE.has(r.state),
+    10_000,
+  );
+  expect(rec, 'run record missing after cancel').toBeTruthy();
+  expect(LIVE.has(rec!.state)).toBe(false);
+  expect(rec!.cancel_reason).toBe('human');
 });
 
 test('security: unauthenticated dispatch → 401', async () => {

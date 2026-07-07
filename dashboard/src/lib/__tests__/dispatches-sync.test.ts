@@ -38,6 +38,7 @@ const RUN_FIXTURE: RunRow = {
   epoch: 1,
   heartbeat: '2026-06-25T10:00:00Z',
   updated_at: '2026-06-25T10:00:00Z',
+  cancel_reason: null,
 };
 
 const TEAM_FIXTURE = {

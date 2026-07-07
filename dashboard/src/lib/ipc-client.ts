@@ -76,6 +76,11 @@ export interface CancelTeamData {
   team_id: string;
 }
 
+/** Task 3.3: run-scoped counterpart to CancelTeamData. */
+export interface CancelRunData {
+  run_id: string;
+}
+
 export interface IPCRequest {
   type:
     | 'status'
@@ -95,9 +100,10 @@ export interface IPCRequest {
     | 'fleet-health'
     | 'spawn-worker'
     | 'cancel-team'
+    | 'cancel-run'
     | 'dispatch-status';
   agent?: string;
-  data?: Record<string, unknown> | SpawnWorkerData | CancelTeamData;
+  data?: Record<string, unknown> | SpawnWorkerData | CancelTeamData | CancelRunData;
 }
 
 export interface IPCResponse {
