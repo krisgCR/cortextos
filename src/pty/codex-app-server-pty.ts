@@ -2,7 +2,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeF
 import { join } from 'path';
 import { homedir } from 'os';
 import { randomBytes } from 'crypto';
-import type { AgentConfig, CtxEnv } from '../types/index.js';
+import type { AgentConfig, CodexSandbox, CtxEnv } from '../types/index.js';
 import { OutputBuffer } from './output-buffer.js';
 import type { TelegramAPI } from '../telegram/api.js';
 import { ensureDir, atomicWriteSync } from '../utils/atomic.js';
@@ -67,15 +67,22 @@ interface GoalResponse {
   } | null;
 }
 
-const THREAD_PERMISSION_OVERRIDES = {
-  approvalPolicy: 'never',
-  sandbox: 'danger-full-access',
-} as const;
+const DEFAULT_SANDBOX: CodexSandbox = 'danger-full-access';
 
-const TURN_PERMISSION_OVERRIDES = {
-  approvalPolicy: 'never',
-  sandboxPolicy: { type: 'dangerFullAccess' },
-} as const;
+/**
+ * Maps the thread-level sandbox string (kebab-case, used by thread/start and
+ * thread/resume) to the per-turn `sandboxPolicy.type` (camelCase, used by
+ * turn/start). Codex's app-server serialises the same policy under two casings;
+ * both must stay consistent so a turn inherits the thread's permission. All three
+ * pairings are verified against Codex 0.142.5's app-server protocol schema: the
+ * kebab-case values are the `--sandbox` enum, and the camelCase values are the
+ * `SandboxPolicy.type` discriminant on `turn/start`'s `TurnStartParams`.
+ */
+const SANDBOX_TURN_TYPE: Record<CodexSandbox, string> = {
+  'read-only': 'readOnly',
+  'workspace-write': 'workspaceWrite',
+  'danger-full-access': 'dangerFullAccess',
+};
 
 const SOCKET_BASENAME = 'codex.sock';
 const SOCKET_PATH_WARN_BYTES = 100;
@@ -134,6 +141,23 @@ export class CodexAppServerPTY {
     this._socketListenArg = socket.listenArg;
     this._socketCwd = socket.cwd;
     this._outputBuffer = new OutputBuffer(1000, logPath, BOOTSTRAP_PATTERN);
+  }
+
+  private get _sandbox(): CodexSandbox {
+    return this._config.codex_sandbox ?? DEFAULT_SANDBOX;
+  }
+
+  /** Thread-level permission overrides (thread/start, thread/resume). */
+  private get threadPermissionOverrides() {
+    return { approvalPolicy: 'never', sandbox: this._sandbox } as const;
+  }
+
+  /** Per-turn permission overrides (turn/start), kept consistent with the thread. */
+  private get turnPermissionOverrides() {
+    return {
+      approvalPolicy: 'never',
+      sandboxPolicy: { type: SANDBOX_TURN_TYPE[this._sandbox] },
+    } as const;
   }
 
   async spawn(mode: 'fresh' | 'continue', prompt: string): Promise<void> {
@@ -486,7 +510,7 @@ export class CodexAppServerPTY {
         const resumed = await this.request<ThreadResponse>('thread/resume', {
           threadId: persisted.threadId,
           cwd: this._cwd,
-          ...THREAD_PERMISSION_OVERRIDES,
+          ...this.threadPermissionOverrides,
           config: { features: { goals: true } },
           excludeTurns: true,
           persistExtendedHistory: true,
@@ -504,7 +528,7 @@ export class CodexAppServerPTY {
         const resumed = await this.request<ThreadResponse>('thread/resume', {
           threadId: latest,
           cwd: this._cwd,
-          ...THREAD_PERMISSION_OVERRIDES,
+          ...this.threadPermissionOverrides,
           config: { features: { goals: true } },
           excludeTurns: true,
           persistExtendedHistory: true,
@@ -516,7 +540,7 @@ export class CodexAppServerPTY {
 
     const started = await this.request<ThreadResponse>('thread/start', {
       cwd: this._cwd,
-      ...THREAD_PERMISSION_OVERRIDES,
+      ...this.threadPermissionOverrides,
       config: { features: { goals: true } },
       sessionStartSource: 'startup',
       experimentalRawEvents: false,
@@ -560,7 +584,7 @@ export class CodexAppServerPTY {
   private async startTurn(input: unknown[]): Promise<void> {
     if (!this._threadId) throw new Error('No Codex app-server thread is active');
     const completion = this.createTurnCompletion();
-    await this.request('turn/start', { threadId: this._threadId, input, ...TURN_PERMISSION_OVERRIDES });
+    await this.request('turn/start', { threadId: this._threadId, input, ...this.turnPermissionOverrides });
     await completion;
   }
 

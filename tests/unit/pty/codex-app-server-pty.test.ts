@@ -808,6 +808,42 @@ describe('CodexAppServerPTY thread lifecycle', () => {
     );
   });
 
+  it('passes a configured codex_sandbox through to thread/start', async () => {
+    requestMock.mockResolvedValue({ result: { thread: { id: 'fresh-thread' } } });
+    const pty = new CodexAppServerPTY(mockEnv, { codex_sandbox: 'read-only' });
+    (pty as unknown as { _rpc: { request: typeof requestMock } })._rpc = { request: requestMock };
+
+    await (pty as unknown as { startOrResumeThread(mode: 'fresh' | 'continue'): Promise<void> }).startOrResumeThread('fresh');
+
+    expect(requestMock).toHaveBeenCalledWith(
+      'thread/start',
+      expect.objectContaining({ sandbox: 'read-only' }),
+    );
+  });
+
+  it('maps codex_sandbox to the camelCase per-turn sandboxPolicy', async () => {
+    requestMock.mockResolvedValue({ result: {} });
+    const pty = new CodexAppServerPTY(mockEnv, { codex_sandbox: 'workspace-write' });
+    (pty as unknown as { _threadId: string })._threadId = 'thread-1';
+    (pty as unknown as { _rpc: { request: typeof requestMock } })._rpc = { request: requestMock };
+
+    const turn = (pty as unknown as { startTurn(input: unknown[]): Promise<void> }).startTurn([
+      { type: 'text', text: 'hi' },
+    ]);
+    await Promise.resolve();
+
+    expect(requestMock).toHaveBeenCalledWith(
+      'turn/start',
+      expect.objectContaining({ sandboxPolicy: { type: 'workspaceWrite' } }),
+    );
+
+    (pty as unknown as { handleRpcMessage(message: unknown): void }).handleRpcMessage({
+      method: 'turn/completed',
+      params: {},
+    });
+    await turn;
+  });
+
   it('resumes the persisted thread in continue mode', async () => {
     fsMocks.existsSync.mockReturnValue(true);
     fsMocks.readFileSync.mockReturnValue(JSON.stringify({

@@ -154,6 +154,16 @@ export interface EcosystemConfig {
   community_publish?: EcosystemFeatureConfig;
 }
 
+/**
+ * Codex app-server sandbox level (least-privilege). Controls how much
+ * filesystem / command access a codex-app-server agent has:
+ *   - 'read-only'          — inspect only, no writes or command execution
+ *   - 'workspace-write'    — edit within the agent's workspace, nothing outside
+ *   - 'danger-full-access' — unrestricted (the prior hardcoded default)
+ * Only the codex-app-server runtime honours this; claude-code and hermes ignore it.
+ */
+export type CodexSandbox = 'read-only' | 'workspace-write' | 'danger-full-access';
+
 export interface AgentConfig {
   startup_delay?: number;
   max_session_seconds?: number;
@@ -202,6 +212,11 @@ export interface AgentConfig {
    * poller will be skipped regardless.
    */
   telegram_polling?: boolean;
+  /**
+   * Codex app-server sandbox level. Absent = 'danger-full-access', preserving the
+   * prior behaviour. Only applied to the codex-app-server runtime.
+   */
+  codex_sandbox?: CodexSandbox;
 }
 
 export interface CronEntry {

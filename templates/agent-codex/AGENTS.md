@@ -124,6 +124,7 @@ Codex agents track context window usage from `thread/tokenUsage/updated` events 
 - `ctx_warning_threshold` — default 70.
 - `ctx_handoff_threshold` — default 80.
 - `codex_context_cap` — fallback context window cap (tokens) used when codex-app-server reports `modelContextWindow=null`. Default 256000. Override per-model only if you know the actual cap.
+- `codex_sandbox` — least-privilege filesystem/command access for this agent. One of `read-only` (inspect only, no writes or command execution), `workspace-write` (edit within the workspace, nothing outside), or `danger-full-access`. Absent = `danger-full-access` (the default; unrestricted). Set a tighter level for specialist or untrusted agents so a bad instruction or injected prompt can't reach beyond what the agent needs.
 
 ---
 
