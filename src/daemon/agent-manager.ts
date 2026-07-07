@@ -25,7 +25,14 @@ import { RuntimeDispatcher } from '../runtime/dispatcher.js';
 import { ClaudeBgAdapter } from '../runtime/adapters/claude-bg.js';
 import { FakeAdapter } from '../runtime/adapters/fake.js';
 import { makeCapabilities } from '../runtime/capabilities.js';
+import { startRuntimeObserver } from '../runtime/runtime-observer.js';
+import { startRunWatchdogLoop } from '../runtime/run-watchdog.js';
+import { spawnAgentsCli } from '../runtime/adapters/claude-discovery.js';
+import type { ReconcileReport } from '../runtime/run-authority.js';
 const ROUTING_TIER_ORDER: Tier[] = ['haiku', 'sonnet', 'opus'];
+
+/** Default runtime-observer poll interval — much smaller than the stall window (CTX_RUN_STALL_MS, default 10m). */
+const DEFAULT_RUNTIME_OBSERVER_MS = 5_000;
 
 /** Default team budget for IPC-dispatched runs (overridable via CTX_TEAM_BUDGET_TOKENS). */
 const DEFAULT_TEAM_BUDGET_TOKENS = parseInt(process.env['CTX_TEAM_BUDGET_TOKENS'] ?? '1000000', 10);
@@ -69,6 +76,20 @@ export class AgentManager {
    * by the PTY RuntimeDriver registered in the dispatcher's lanes map.
    */
   readonly dispatcher: RuntimeDispatcher;
+
+  /**
+   * Stop-function for the runtime-boundary observer loop (Task 2.1), set by
+   * `startRuntimeObserverLoop()`. Null when the observer is not running —
+   * doubles as the idempotency guard (a second start call is a no-op).
+   */
+  private _observerStop: (() => void) | null = null;
+
+  /**
+   * Stop-function for the run watchdog loop (Phase 0a Task 3.1 deadline /
+   * Task 3.2 stall), set by `startRunWatchdogLoop()`. Null when not running
+   * — doubles as the idempotency guard, matching `_observerStop`.
+   */
+  private _watchdogStop: (() => void) | null = null;
 
   /**
    * Sidecar prompt store for PTY lane dispatch.
@@ -124,6 +145,74 @@ export class AgentManager {
       console.log('[agent-manager] CTX_E2E_FAKE_RUNTIME=1 — all dispatch lanes use the zero-bill FakeAdapter (no billed sessions).');
     }
     this.dispatcher = new RuntimeDispatcher(instanceId, lanes);
+  }
+
+  /**
+   * Start the runtime-boundary observer loop (Task 2.1).
+   *
+   * Idempotent — a second call while already running is a no-op. NOT
+   * auto-wired into the constructor or `discoverAndStart()`: those are
+   * exercised heavily by unit tests that construct `AgentManager` in
+   * isolation (often without mocking `os.homedir()`), so auto-starting a
+   * background interval + real filesystem writes there would leak side
+   * effects into the whole daemon test suite. Call this explicitly once
+   * from the real daemon boot path (`src/daemon/index.ts`), after
+   * `discoverAndStart()`.
+   */
+  startRuntimeObserverLoop(): void {
+    if (this._observerStop) return;
+    const intervalMs = parseInt(
+      process.env['CTX_RUNTIME_OBSERVER_MS'] ?? String(DEFAULT_RUNTIME_OBSERVER_MS),
+      10,
+    );
+    this._observerStop = startRuntimeObserver(intervalMs);
+  }
+
+  /** Stop the runtime-boundary observer loop, if running. Idempotent. */
+  stopRuntimeObserverLoop(): void {
+    if (this._observerStop) {
+      this._observerStop();
+      this._observerStop = null;
+    }
+  }
+
+  /**
+   * Start the run watchdog loop (Task 3.1 deadline sweep + Task 3.2 stall
+   * sweep). Idempotent — a second call while already running is a no-op.
+   * Issues cancels through `this.dispatcher.cancelRun()` — the same guarded
+   * primitive every other caller uses (coordination invariant). NOT
+   * auto-wired into the constructor, for the same isolation reason as
+   * `startRuntimeObserverLoop` — call explicitly from the real daemon boot
+   * path (`src/daemon/index.ts`).
+   */
+  startRunWatchdogLoop(): void {
+    if (this._watchdogStop) return;
+    const intervalMs = parseInt(
+      process.env['CTX_RUN_WATCHDOG_MS'] ?? '5000',
+      10,
+    );
+    this._watchdogStop = startRunWatchdogLoop(this.dispatcher, this.instanceId, intervalMs);
+  }
+
+  /** Stop the run watchdog loop, if running. Idempotent. */
+  stopRunWatchdogLoop(): void {
+    if (this._watchdogStop) {
+      this._watchdogStop();
+      this._watchdogStop = null;
+    }
+  }
+
+  /**
+   * Reconcile the run-authority ledger against a live `claude agents`
+   * snapshot (Task 2.3). Sticky (terminal / mid-cancel) records are never
+   * re-adopted as live; any the native supervisor still reports live are
+   * re-terminated through `RuntimeDispatcher.reconcileBoot`'s guarded
+   * escalation path. Call once from the real daemon boot path, before
+   * agents are (re)started, so a crash mid-cancel never resurrects a run.
+   */
+  async reconcileRunsOnBoot(): Promise<ReconcileReport> {
+    const { entries, ok } = await spawnAgentsCli();
+    return this.dispatcher.reconcileBoot(entries, ok);
   }
 
   /**
@@ -1047,6 +1136,10 @@ export class AgentManager {
    * time `pty.kill()` runs, every agent already has its marker on disk.
    */
   async stopAll(): Promise<void> {
+    // Clean shutdown, Task 2.1 / 3.1-3.2: no orphaned interval survives daemon stop.
+    this.stopRuntimeObserverLoop();
+    this.stopRunWatchdogLoop();
+
     const names = [...this.agents.keys()];
 
     for (const name of names) {

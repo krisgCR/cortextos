@@ -2,7 +2,7 @@ import { createServer, Server, Socket } from 'net';
 import { existsSync, unlinkSync, chmodSync, readFileSync } from 'fs';
 import { join, resolve as pathResolve } from 'path';
 import { randomUUID } from 'crypto';
-import type { IPCRequest, IPCResponse, CronSummaryRow, CronDefinition, DispatchStatusPayload } from '../types/index.js';
+import type { IPCRequest, IPCResponse, CronSummaryRow, CronDefinition, DispatchStatusPayload, CancelReason } from '../types/index.js';
 import { AgentManager } from './agent-manager.js';
 import { getIpcPath } from '../utils/paths.js';
 import { readCrons, getExecutionLog, getExecutionLogPage, addCron, updateCron, removeCron, getCronByName } from '../bus/crons.js';
@@ -108,6 +108,38 @@ export function handleFireCron(
   _manualFireLastFired.set(`${agent}::${cronName}`, firedAt);
 
   return { ok: true, firedAt };
+}
+
+// ---------------------------------------------------------------------------
+// cancel-run handler — Task 3.3 (human cancel path)
+// ---------------------------------------------------------------------------
+
+/**
+ * cancel-run handler — human-invoked cancellation of a single run.
+ *
+ * Fire-and-forget, mirroring the existing cancel-team handler: delegates to
+ * the injected `cancelRunFn` (in production, `dispatcher.cancelRun`) — the
+ * SAME guarded run-authority primitive used by the deadline/stall watchdog
+ * sweeps. This is intentionally the ONLY place a human-initiated cancel is
+ * wired; no separate kill path is introduced. Exported for direct unit
+ * testing without a live IPC socket.
+ *
+ * @param runId       - Run ID to cancel, from `request.data.run_id`.
+ * @param cancelRunFn - `dispatcher.cancelRun` or a test stub.
+ */
+export function handleCancelRun(
+  runId: string | undefined,
+  cancelRunFn: (run_id: string, reason: CancelReason) => Promise<void>,
+): IPCResponse {
+  if (!runId || !runId.trim()) {
+    return { success: false, error: 'cancel-run requires: data.run_id' };
+  }
+
+  cancelRunFn(runId, 'human').catch((err) =>
+    console.error(`[ipc] cancel-run failed for ${runId}:`, err),
+  );
+
+  return { success: true, data: `Cancelling run ${runId}` };
 }
 
 // ---------------------------------------------------------------------------
@@ -745,6 +777,15 @@ export class IPCServer {
               .catch(err => console.error(`[ipc] cancel-team failed:`, err));
             response = { success: true, data: `Cancelling team ${teamId}` };
           }
+          break;
+        }
+
+        case 'cancel-run': {
+          const runId = request.data?.run_id as string | undefined;
+          response = handleCancelRun(
+            runId,
+            (id, reason) => this.agentManager.dispatcher.cancelRun(id, reason),
+          );
           break;
         }
 

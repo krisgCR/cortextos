@@ -263,8 +263,23 @@ class Daemon {
     this.ipcServer = new IPCServer(this.agentManager, this.instanceId);
     await this.ipcServer.start();
 
+    // Reconcile the run-authority ledger against the native supervisor
+    // BEFORE agents are (re)started, so a cancel decided just before a
+    // crash never gets resurrected as live (Phase 0a Task 2.3).
+    try {
+      await this.agentManager.reconcileRunsOnBoot();
+    } catch (err) {
+      console.error('[daemon] reconcileRunsOnBoot failed (non-fatal):', err);
+    }
+
     // Discover and start agents
     await this.agentManager.discoverAndStart();
+
+    // Start the runtime-boundary observer loop (Phase 0a Task 2.1).
+    this.agentManager.startRuntimeObserverLoop();
+
+    // Start the run watchdog loop (Phase 0a Task 3.1 deadline / Task 3.2 stall).
+    this.agentManager.startRunWatchdogLoop();
 
     console.log(`[daemon] Running (pid: ${process.pid})`);
 

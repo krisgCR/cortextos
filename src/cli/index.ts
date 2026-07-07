@@ -27,6 +27,7 @@ import { importAgentCommand } from './import-agent.js';
 import { updateCommand } from './update.js';
 import { daemonCommand } from './daemon.js';
 import { dispatchCommand } from './dispatch.js';
+import { cancelRunCommand } from './cancel-run.js';
 
 const program = new Command();
 
@@ -64,6 +65,7 @@ program.addCommand(importAgentCommand);
 program.addCommand(updateCommand);
 program.addCommand(daemonCommand);
 program.addCommand(dispatchCommand);
+program.addCommand(cancelRunCommand);
 
 // crash-alert: SessionEnd hook — cross-platform replacement for crash-alert.sh
 const crashAlertCommand = new Command('crash-alert')
